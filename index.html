@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="nl">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Modelr Studio</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="projects.css" />
+  </head>
+  <body>
+    <div class="app-shell" id="appShell" aria-hidden="true">
+      <header class="topbar">
+        <div class="brand"><span class="brand-mark">M</span><span>modelr</span><span class="brand-pill">STUDIO</span></div>
+        <div class="file-menu"><button id="fileMenuButton">File <span>⌄</span></button><div class="file-dropdown" id="fileDropdown"><button id="closeProjectButton">Close project</button><button id="projectsButton">My projects</button><button id="newProjectButton">New project</button></div><button>Edit</button><button>Render</button><button>Help</button></div>
+        <div class="project-name"><span class="live-dot"></span><span id="projectName">Untitled scene</span><button class="icon-button" title="Project hernoemen">✎</button></div>
+        <div class="top-actions"><button class="outline-button" id="saveButton">↥&nbsp; Save</button><button class="avatar" id="avatarButton">A</button></div>
+      </header>
+
+      <main class="workspace">
+        <aside class="left-toolbar">
+          <button class="tool active" data-tool="select" title="Selecteren">↖</button>
+          <button class="tool" data-tool="move" title="Verplaatsen">✥</button>
+          <button class="tool" data-tool="rotate" title="Roteren">⟳</button>
+          <button class="tool" data-tool="scale" title="Schalen">⌗</button>
+          <span class="toolbar-rule"></span>
+          <button class="tool" id="addCube" title="Kubus toevoegen">◇</button>
+          <button class="tool" id="addSphere" title="Bol toevoegen">●</button>
+          <button class="tool" id="addCylinder" title="Cilinder toevoegen">▱</button>
+          <span class="toolbar-rule"></span>
+          <button class="tool" title="Camera">▣</button>
+          <button class="tool" title="Licht">☼</button>
+        </aside>
+
+        <section class="viewport-panel">
+          <div class="viewport-header"><div class="view-tabs"><button class="view-tab active">Layout</button><button class="view-tab">Modeling</button><button class="view-tab">Sculpting</button></div><div class="viewport-tools"><button>◉ <span>Material</span></button><button>☼ <span>Studio light</span></button><button class="kebab">⋮</button></div></div>
+          <div id="viewport" class="viewport"><div class="axis-gizmo"><span class="axis-z">Z</span><span class="axis-y">Y</span><span class="axis-x">X</span><i></i></div><div class="viewport-hint">Rechtsklik: orbit · Scroll: zoom · Sleep: transform</div><div class="selection-label" id="selectionLabel">Cube</div></div>
+          <div class="viewport-footer"><span><b>Perspective</b> · User Orthographic</span><span id="objectCount">1 object</span><span>▦ Grid 1m</span></div>
+        </section>
+
+        <aside class="right-panel">
+          <button class="sidebar-toggle" id="sidebarToggle" title="Zijpaneel inklappen">›</button><div class="sidebar-resize" id="sidebarResize" title="Zijpaneel breder/smaller maken"></div>
+          <div class="panel-tabs"><button class="panel-tab active">Scene</button><button class="panel-tab">World</button><button class="panel-tab">Render</button></div>
+          <div class="outliner"><div class="section-title"><span>SCENE COLLECTION</span><button>＋</button></div><div id="objectList"></div></div>
+          <div class="properties"><div class="properties-title"><span>OBJECT PROPERTIES</span><span class="property-icon">◈</span></div><div class="selected-object"><span class="object-dot" id="selectedDot"></span><strong id="propertyName">Cube</strong><span class="object-type" id="propertyType">MESH</span></div><div class="beginner-tip">● Sleep aan een bolletje om één zijde te schalen</div>
+            <div class="property-group"><div class="group-heading"><span>Transform</span><span>⌃</span></div><div class="transform-grid"><label>Location X<input id="posX" type="number" step="0.1" /></label><label>Y<input id="posY" type="number" step="0.1" /></label><label>Z<input id="posZ" type="number" step="0.1" /></label><label>Scale X<input id="scaleX" type="number" step="0.1" min="0.1" /></label><label>Y<input id="scaleY" type="number" step="0.1" min="0.1" /></label><label>Z<input id="scaleZ" type="number" step="0.1" min="0.1" /></label></div></div>
+            <div class="property-group"><div class="group-heading"><span>Appearance</span><span>⌃</span></div><label class="color-row">Base color <input id="colorPicker" type="color" value="#f26639" /><span id="colorValue">#F26639</span></label><label class="range-row">Roughness <input id="roughness" type="range" min="0" max="1" step="0.01" value="0.32" /><span id="roughnessValue">0.32</span></label><label class="range-row">Metallic <input id="metallic" type="range" min="0" max="1" step="0.01" value="0.08" /><span id="metallicValue">0.08</span></label></div>
+            <button class="code-button" id="codeButton">&lt;/&gt;&nbsp; View generated code <span>→</span></button>
+          </div>
+        </aside>
+      </main>
+      <footer class="timeline"><div class="play-controls"><button>◀</button><button class="play">▶</button><button>▶|</button></div><div class="timeline-label">Timeline</div><div class="frames"><span>0</span><span>20</span><span>40</span><span>60</span><span>80</span><span>100</span><i class="playhead"></i></div><div class="timeline-end">End <b>120</b></div></footer>
+    </div>
+
+    <div class="auth-screen" id="authScreen"><div class="auth-visual"><div class="orb orb-one"></div><div class="orb orb-two"></div><div class="auth-grid"></div><div class="visual-word">CREATE<br /><em>WITHOUT</em><br />LIMITS.</div><div class="visual-caption">A new space for your ideas<br />to take shape.</div></div><div class="auth-card"><div class="auth-brand"><span class="brand-mark">M</span> modelr <span class="brand-pill">STUDIO</span></div><div class="auth-heading"><span class="eyebrow">YOUR CREATIVE SPACE</span><h1>Make something<br /><i>real.</i></h1><p>Design in 3D. Keep every idea. Build your world.</p></div><div class="auth-tabs"><button class="auth-tab active" data-auth="signup">Create account</button><button class="auth-tab" data-auth="login">Sign in</button></div><form id="authForm"><label>Email address<input id="emailInput" type="email" placeholder="you@example.com" autocomplete="email" required /></label><label>Password<input id="passwordInput" type="password" placeholder="At least 8 characters" autocomplete="new-password" minlength="8" required /></label><div class="auth-error" id="authError" role="alert"></div><button class="primary-button" type="submit"><span id="authSubmitText">Start creating</span><span>→</span></button></form><div class="auth-note">By continuing, you agree to our <u>Terms</u> and <u>Privacy Policy</u>.</div></div></div>
+    <div class="code-modal" id="codeModal"><div class="modal-card"><div class="modal-heading"><div><span class="eyebrow">MODEL SCRIPT</span><h2>Your scene, in code.</h2></div><button id="closeModal">×</button></div><p class="modal-help">Bekijk je model als script, of plak eigen model-code en vervang de scene.</p><textarea id="generatedCode" spellcheck="false"></textarea><div class="modal-actions"><button class="secondary-button" id="applyCode">Apply code</button><button class="primary-button" id="copyCode">Copy code <span>↗</span></button></div><div class="code-status" id="codeStatus"></div></div></div>
+    <div class="project-modal" id="projectModal"><div class="project-card"><div class="modal-heading"><div><span class="eyebrow" id="projectModalEyebrow">SAVE PROJECT</span><h2 id="projectModalTitle">Save your project.</h2></div><button id="closeProjectModal">×</button></div><p class="modal-help" id="projectModalHelp">Geef je project een naam zodat je het later kunt openen.</p><input class="project-input" id="projectNameInput" type="text" placeholder="Bijvoorbeeld: mijn eerste kubus" maxlength="48" /><div class="project-list" id="projectList"></div><div class="modal-actions"><button class="secondary-button" id="cancelProjectModal">Cancel</button><button class="primary-button" id="confirmProjectModal">Save project <span>→</span></button></div><div class="code-status" id="projectStatus"></div></div></div>
+    <script>
+      (() => {
+        const authScreen = document.querySelector('#authScreen');
+        const appShell = document.querySelector('#appShell');
+        const form = document.querySelector('#authForm');
+        const error = document.querySelector('#authError');
+        const users = JSON.parse(localStorage.getItem('modelrUsers') || '{}');
+        let mode = 'signup';
+        const enterStudio = email => {
+          localStorage.setItem('modelrUser', email);
+          authScreen.style.display = 'none';
+          appShell.setAttribute('aria-hidden', 'false');
+        };
+        document.querySelectorAll('.auth-tab').forEach(tab => tab.addEventListener('click', () => {
+          mode = tab.dataset.auth;
+          document.querySelectorAll('.auth-tab').forEach(item => item.classList.toggle('active', item === tab));
+          document.querySelector('#authSubmitText').textContent = mode === 'login' ? 'Continue to studio' : 'Start creating';
+          error.textContent = '';
+        }));
+        form.addEventListener('submit', event => {
+          event.preventDefault();
+          const email = document.querySelector('#emailInput').value.trim().toLowerCase();
+          const password = document.querySelector('#passwordInput').value;
+          if (mode === 'signup' && users[email]) { error.textContent = 'Dit account bestaat al. Kies Sign in.'; return; }
+          if (mode === 'login' && !users[email]) { error.textContent = 'Geen account gevonden. Kies Create account.'; return; }
+          if (mode === 'login' && users[email] !== password) { error.textContent = 'Wachtwoord klopt niet.'; return; }
+          users[email] = password;
+          localStorage.setItem('modelrUsers', JSON.stringify(users));
+          enterStudio(email);
+        });
+        const savedUser = localStorage.getItem('modelrUser');
+        if (savedUser && users[savedUser]) enterStudio(savedUser);
+      })();
+    </script>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"
+        }
+      }
+    </script>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>
