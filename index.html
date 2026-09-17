@@ -10,6 +10,7 @@
     <link rel="stylesheet" href="styles.css" />
     <link rel="stylesheet" href="projects.css" />
     <style>.project-row span{display:flex;flex-direction:column;gap:4px}.project-row span small{margin:0;color:#858b82;font:10px 'DM Mono',monospace}</style>
+    <style>.snap-toggle{display:flex;align-items:center;gap:9px;color:#aeb2aa;font:10px 'DM Mono',monospace;padding:10px 0}.snap-toggle input{accent-color:#f26639;width:15px;height:15px}</style>
   </head>
   <body>
     <div class="app-shell" id="appShell" aria-hidden="true">
@@ -47,7 +48,7 @@
           <div class="outliner"><div class="section-title"><span>SCENE COLLECTION</span><button>＋</button></div><div id="objectList"></div></div>
           <div class="properties"><div class="properties-title"><span>OBJECT PROPERTIES</span><span class="property-icon">◈</span></div><div class="selected-object"><span class="object-dot" id="selectedDot"></span><strong id="propertyName">Cube</strong><span class="object-type" id="propertyType">MESH</span></div><div class="beginner-tip">● Sleep aan een bolletje om één zijde te schalen</div>
             <div class="property-group"><div class="group-heading"><span>Transform</span><span>⌃</span></div><div class="transform-grid"><label>Location X<input id="posX" type="number" step="0.1" /></label><label>Y<input id="posY" type="number" step="0.1" /></label><label>Z<input id="posZ" type="number" step="0.1" /></label><label>Scale X<input id="scaleX" type="number" step="0.1" min="0.1" /></label><label>Y<input id="scaleY" type="number" step="0.1" min="0.1" /></label><label>Z<input id="scaleZ" type="number" step="0.1" min="0.1" /></label></div></div>
-            <div class="property-group"><div class="group-heading"><span>Appearance</span><span>⌃</span></div><label class="color-row">Base color <input id="colorPicker" type="color" value="#f26639" /><span id="colorValue">#F26639</span></label><label class="range-row">Roughness <input id="roughness" type="range" min="0" max="1" step="0.01" value="0.32" /><span id="roughnessValue">0.32</span></label><label class="range-row">Metallic <input id="metallic" type="range" min="0" max="1" step="0.01" value="0.08" /><span id="metallicValue">0.08</span></label></div>
+            <div class="property-group"><div class="group-heading"><span>Appearance</span><span>⌃</span></div><label class="color-row">Base color <input id="colorPicker" type="color" value="#f26639" /><span id="colorValue">#F26639</span></label><label class="range-row">Roughness <input id="roughness" type="range" min="0" max="1" step="0.01" value="0.32" /><span id="roughnessValue">0.32</span></label><label class="range-row">Metallic <input id="metallic" type="range" min="0" max="1" step="0.01" value="0.08" /><span id="metallicValue">0.08</span></label></div><label class="snap-toggle"><input id="rotationSnap" type="checkbox" /> Snap rotation to 90°</label>
             <button class="code-button" id="codeButton">&lt;/&gt;&nbsp; View generated code <span>→</span></button>
           </div>
         </aside>

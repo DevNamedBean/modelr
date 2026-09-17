@@ -152,7 +152,7 @@ renderer.domElement.addEventListener('pointermove', event => {
   }
   const activeTool = document.querySelector('.tool.active')?.dataset.tool;
   if (activeTool === 'scale') selected.scale.set(Math.max(.1, dragStart.scale.x + dx), Math.max(.1, dragStart.scale.y - dy), Math.max(.1, dragStart.scale.z + dx));
-  else if (activeTool === 'rotate') selected.rotation.y = dx;
+  else if (activeTool === 'rotate') { const freeRotation = dx; selected.rotation.y = document.querySelector('#rotationSnap').checked ? Math.round(freeRotation / (Math.PI / 2)) * (Math.PI / 2) : freeRotation; }
   else selected.position.set(dragStart.position.x + dx, dragStart.position.y - dy, dragStart.position.z);
   syncInputs();
 });
@@ -211,4 +211,4 @@ document.querySelector('#closeProjectModal').onclick = () => { projectModal.clas
 document.querySelector('#cancelProjectModal').onclick = () => projectModalMode === 'confirm' ? closeProject() : projectModal.classList.remove('open');
 document.querySelector('#confirmProjectModal').onclick = () => { if (projectModalMode === 'confirm') { closeAfterSave = true; openProjectModal('save'); } else if (projectModalMode === 'projects') { projectModal.classList.remove('open'); projectModal.style.display = 'none'; } else saveProject(); };
 document.querySelector('#saveButton').onclick = event => { const button = event.currentTarget; if (!currentProjectName) { openProjectModal('save'); return; } saveProject(); button.innerHTML = '✓&nbsp; Saved'; setTimeout(() => button.innerHTML = '↥&nbsp; Save', 1300); };
-function animate() { requestAnimationFrame(animate); controls.update(); renderer.render(scene, camera); } animate();
+function animate() { requestAnimationFrame(animate); controls.update(); renderer.render(scene, camera); } animate();function animate() { requestAnimationFrame(animate); controls.update(); renderer.render(scene, camera); } animate();
