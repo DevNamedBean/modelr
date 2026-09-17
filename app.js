@@ -208,7 +208,8 @@ document.querySelector('#closeProjectButton').onclick = () => { fileDropdown.cla
 document.querySelector('#projectsButton').onclick = () => { fileDropdown.classList.remove('open'); openProjectModal('projects'); };
 document.querySelector('#newProjectButton').onclick = () => { fileDropdown.classList.remove('open'); currentProjectName = ''; document.querySelector('#projectName').textContent = 'Untitled scene'; restoreScene([]); addObject('Cube', 0x999999, [0, .8, 0]); };
 document.querySelector('#closeProjectModal').onclick = () => { projectModal.classList.remove('open'); projectModal.style.display = 'none'; };
-document.querySelector('#cancelProjectModal').onclick = () => projectModalMode === 'confirm' ? closeProject() : projectModal.classList.remove('open');
+document.querySelector('#cancelProjectModal').onclick = () => { if (projectModalMode === 'confirm') closeProject(); else { projectModal.classList.remove('open'); projectModal.style.display = 'none'; } };
 document.querySelector('#confirmProjectModal').onclick = () => { if (projectModalMode === 'confirm') { closeAfterSave = true; openProjectModal('save'); } else if (projectModalMode === 'projects') { projectModal.classList.remove('open'); projectModal.style.display = 'none'; } else saveProject(); };
 document.querySelector('#saveButton').onclick = event => { const button = event.currentTarget; if (!currentProjectName) { openProjectModal('save'); return; } saveProject(); button.innerHTML = '✓&nbsp; Saved'; setTimeout(() => button.innerHTML = '↥&nbsp; Save', 1300); };
-function animate() { requestAnimationFrame(animate); controls.update(); renderer.render(scene, camera); } animate();function animate() { requestAnimationFrame(animate); controls.update(); renderer.render(scene, camera); } animate();
+window.addEventListener('beforeunload', autoSaveScene);
+function animate() { requestAnimationFrame(animate); controls.update(); renderer.render(scene, camera); } animate();
