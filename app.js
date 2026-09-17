@@ -56,9 +56,10 @@ function makeMesh(type, color) {
 function addObject(type, color = 0x999999, position = [0, .8, 0]) { const mesh = makeMesh(type, color); mesh.position.set(...position); mesh.name = `${type} ${objectIndex++}`; scene.add(mesh); objects.push(mesh); selectObject(mesh); updateList(); return mesh; }
 addObject('Cube', 0x999999, [0, .8, 0]).name = 'Cube 1';
 const savedScene = JSON.parse(localStorage.getItem('modelrSceneV2') || 'null');
-if (Array.isArray(savedScene) && savedScene.length) {
+const validSavedScene = Array.isArray(savedScene) ? savedScene.filter(item => Array.isArray(item.position) && item.position.length === 3 && item.position.every(Number.isFinite)) : [];
+if (validSavedScene.length) {
   objects.splice(0).forEach(mesh => scene.remove(mesh));
-  savedScene.forEach(item => { const mesh = addObject(item.name.split(' ')[0], parseInt(item.color, 16), item.position); mesh.name = item.name; mesh.scale.fromArray(item.scale); });
+  validSavedScene.forEach(item => { const mesh = addObject(item.name.split(' ')[0], parseInt(item.color || '999999', 16), item.position); mesh.name = item.name; if (Array.isArray(item.scale)) mesh.scale.fromArray(item.scale); });
   selectObject(objects[0]);
 }
 else {
@@ -68,7 +69,7 @@ if (!objects.length) addObject('Cube', 0x999999, [0, .8, 0]);
 
 function sceneSnapshot() { return objects.map(mesh => ({ name: mesh.name, type: mesh.name.startsWith('Sphere') ? 'Sphere' : mesh.name.startsWith('Cylinder') ? 'Cylinder' : 'Cube', color: mesh.material.color.getHexString(), position: mesh.position.toArray(), scale: mesh.scale.toArray(), rotation: mesh.rotation.toArray() })); }
 function rememberScene() { undoStack.push(sceneSnapshot()); if (undoStack.length > 50) undoStack.shift(); redoStack.length = 0; }
-function restoreScene(snapshot) { objects.forEach(mesh => scene.remove(mesh)); objects.length = 0; snapshot.forEach(item => { const mesh = addObject(item.type, parseInt(item.color, 16), item.position); mesh.name = item.name; mesh.scale.fromArray(item.scale); if (item.rotation) mesh.rotation.fromArray(item.rotation); }); if (objects[0]) selectObject(objects[0]); updateList(); }
+function restoreScene(snapshot) { objects.forEach(mesh => scene.remove(mesh)); objects.length = 0; snapshot.filter(item => Array.isArray(item.position) && item.position.length === 3 && item.position.every(Number.isFinite)).forEach(item => { const mesh = addObject(item.type, parseInt(item.color || '999999', 16), item.position); mesh.name = item.name; if (Array.isArray(item.scale)) mesh.scale.fromArray(item.scale); if (item.rotation) mesh.rotation.fromArray(item.rotation); }); if (!objects.length) addObject('Cube', 0x999999, [0, .8, 0]); selectObject(objects[0]); updateList(); }
 function undo() { if (!undoStack.length) return; redoStack.push(sceneSnapshot()); restoreScene(undoStack.pop()); }
 function redo() { if (!redoStack.length) return; undoStack.push(sceneSnapshot()); restoreScene(redoStack.pop()); }
 
