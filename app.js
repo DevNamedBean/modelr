@@ -66,6 +66,10 @@ else {
   selectObject(objects[0]);
 }
 if (!objects.length) addObject('Cube', 0x999999, [0, .8, 0]);
+objects.forEach(mesh => { mesh.visible = true; if (!mesh.position.toArray().every(Number.isFinite)) mesh.position.set(0, .8, 0); if (!mesh.scale.toArray().every(value => Number.isFinite(value) && value > 0)) mesh.scale.set(1, 1, 1); });
+camera.position.set(6, 4.5, 7);
+controls.target.set(0, .8, 0);
+controls.update();
 
 function sceneSnapshot() { return objects.map(mesh => ({ name: mesh.name, type: mesh.name.startsWith('Sphere') ? 'Sphere' : mesh.name.startsWith('Cylinder') ? 'Cylinder' : 'Cube', color: mesh.material.color.getHexString(), position: mesh.position.toArray(), scale: mesh.scale.toArray(), rotation: mesh.rotation.toArray() })); }
 function rememberScene() { undoStack.push(sceneSnapshot()); if (undoStack.length > 50) undoStack.shift(); redoStack.length = 0; }
