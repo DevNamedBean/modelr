@@ -34,12 +34,18 @@ const floor = new THREE.Mesh(new THREE.PlaneGeometry(20, 20), new THREE.MeshStan
 floor.rotation.x = -Math.PI / 2; floor.position.y = -.02; floor.receiveShadow = true; scene.add(floor);
 const grid = new THREE.GridHelper(20, 20, 0x465047, 0x2b302c); grid.position.y = .01; scene.add(grid);
 const scaleHandles = [];
+const rotateHandles = [];
 ['x', 'y', 'z'].forEach(axis => [-1, 1].forEach(sign => {
   const handle = new THREE.Mesh(new THREE.SphereGeometry(.14, 18, 12), new THREE.MeshStandardMaterial({ color: 0xf26639, emissive: 0x4c1709, emissiveIntensity: .4 }));
   handle.userData = { scaleHandle: true, axis, sign };
   handle.visible = false;
   scene.add(handle);
   scaleHandles.push(handle);
+  const rotateHandle = new THREE.Mesh(new THREE.SphereGeometry(.14, 18, 12), new THREE.MeshStandardMaterial({ color: 0x6fa9dc, emissive: 0x102b4b, emissiveIntensity: .4 }));
+  rotateHandle.userData = { rotateHandle: true, axis, sign };
+  rotateHandle.visible = false;
+  scene.add(rotateHandle);
+  rotateHandles.push(rotateHandle);
 }));
 
 function makeMesh(type, color) {
@@ -75,6 +81,14 @@ function updateScaleHandles() {
     localPosition[handle.userData.axis] = halfSize[handle.userData.axis] * selected.scale[handle.userData.axis] * handle.userData.sign;
     handle.position.copy(selected.localToWorld(localPosition));
   });
+  rotateHandles.forEach(handle => {
+    handle.visible = Boolean(selected) && document.querySelector('.tool.active')?.dataset.tool === 'rotate';
+    if (!selected) return;
+    const halfSize = selected.geometry.parameters?.width ? new THREE.Vector3(selected.geometry.parameters.width, selected.geometry.parameters.height, selected.geometry.parameters.depth).multiplyScalar(.5) : new THREE.Vector3(.85, .85, .85);
+    const localPosition = new THREE.Vector3();
+    localPosition[handle.userData.axis] = (halfSize[handle.userData.axis] * selected.scale[handle.userData.axis] + .25) * handle.userData.sign;
+    handle.position.copy(selected.localToWorld(localPosition));
+  });
 }
 function selectObject(mesh) { selected = mesh; document.querySelector('#selectionLabel').textContent = mesh.name; document.querySelector('#propertyName').textContent = mesh.name; document.querySelector('#propertyType').textContent = 'MESH'; const hex = `#${mesh.material.color.getHexString()}`; document.querySelector('#colorPicker').value = hex; document.querySelector('#colorValue').textContent = hex.toUpperCase(); syncInputs(); updateList(); }
 function syncInputs() { if (!selected) return; ['x','y','z'].forEach(axis => { document.querySelector(`#pos${axis.toUpperCase()}`).value = selected.position[axis].toFixed(2); document.querySelector(`#scale${axis.toUpperCase()}`).value = selected.scale[axis].toFixed(2); }); document.querySelector('#selectedDot').style.background = `#${selected.material.color.getHexString()}`; updateScaleHandles(); }
@@ -97,6 +111,13 @@ renderer.domElement.addEventListener('pointerdown', event => {
   pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
   pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
   raycaster.setFromCamera(pointer, camera);
+  const rotateHit = raycaster.intersectObjects(rotateHandles)[0];
+  if (rotateHit && selected) {
+    rememberScene();
+    dragStart = { x: event.clientX, y: event.clientY, rotation: selected.rotation.clone(), handle: rotateHit.object };
+    controls.enabled = false;
+    return;
+  }
   const handleHit = raycaster.intersectObjects(scaleHandles)[0];
   if (handleHit && selected) {
     rememberScene();
@@ -111,6 +132,13 @@ renderer.domElement.addEventListener('pointermove', event => {
   if (!dragStart || !selected) return;
   const dx = (event.clientX - dragStart.x) * .012;
   const dy = (event.clientY - dragStart.y) * .012;
+  if (dragStart.handle?.userData.rotateHandle) {
+    const axis = dragStart.handle.userData.axis;
+    const sign = dragStart.handle.userData.sign;
+    selected.rotation[axis] = dragStart.rotation[axis] + (axis === 'y' ? -dy : dx) * sign;
+    syncInputs();
+    return;
+  }
   if (dragStart.handle) {
     const axis = dragStart.handle.userData.axis;
     const sign = dragStart.handle.userData.sign;
