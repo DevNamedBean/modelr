@@ -320,24 +320,36 @@ document.querySelector('#duplicatePart').onclick = () => { if (!contextPart) ret
 document.querySelector('#deletePart').onclick = () => { if (!contextPart) return; rememberScene(); const index = objects.indexOf(contextPart); if (index >= 0) objects.splice(index, 1); scene.remove(contextPart); if (!objects.length) addObject('Cube', 0x999999, [0, .8, 0]); selectObject(objects[Math.max(0, index - 1)] || objects[0]); updateList(); contextPart = null; partContext.classList.remove('open'); };
 [['roughness','roughnessValue'],['metallic','metallicValue']].forEach(([id, output]) => document.querySelector(`#${id}`).addEventListener('input', event => { if (selected) selected.material[id] = Number(event.target.value); document.querySelector(`#${output}`).textContent = Number(event.target.value).toFixed(2); }));
 
-function generatedCode() { return `// modelr scene\nconst scene = new THREE.Scene();\n\n${objects.map(mesh => { const name = String(mesh.name || 'Object').toLowerCase().replaceAll(' ', '_'); return `const ${name} = new THREE.Mesh(\n  new THREE.${mesh.name.startsWith('Sphere') ? 'Sphere' : mesh.name.startsWith('Cylinder') ? 'Cylinder' : 'Box'}Geometry(${mesh.name.startsWith('Sphere') ? '.85, 32, 20' : mesh.name.startsWith('Cylinder') ? '.65, .65, 1.5, 32' : '1.55, 1.55, 1.55'}),\n  new THREE.MeshStandardMaterial({ color: '${mesh.material.color.getHexString()}', roughness: ${mesh.material.roughness.toFixed(2)}, metalness: ${mesh.material.metalness.toFixed(2)} })\n);\n${name}.position.set(${mesh.position.x.toFixed(2)}, ${mesh.position.y.toFixed(2)}, ${mesh.position.z.toFixed(2)});\nscene.add(${name});`; }).join('\n\n')}`; }
+function generatedCode() {
+  const geometryCode = mesh => {
+    if (mesh.name.startsWith('Sphere')) return 'new THREE.SphereGeometry(.85, 32, 20)';
+    if (mesh.name.startsWith('Cylinder')) return 'new THREE.CylinderGeometry(.65, .65, 1.5, 32)';
+    if (mesh.name.startsWith('Torus')) return 'new THREE.TorusGeometry(.72, .18, 18, 48)';
+    if (mesh.name.startsWith('Cone')) return 'new THREE.ConeGeometry(.72, 1.45, 32)';
+    if (mesh.name.startsWith('Crown')) return "new THREE.ExtrudeGeometry(new THREE.Shape().setFromPoints([new THREE.Vector2(-.78, -.55), new THREE.Vector2(.78, -.55), new THREE.Vector2(.68, .45), new THREE.Vector2(.36, .05), new THREE.Vector2(0, .72), new THREE.Vector2(-.36, .05), new THREE.Vector2(-.68, .45)]), { depth: .48, bevelEnabled: true, bevelSegments: 2, bevelSize: .06, bevelThickness: .06 })";
+    return `new THREE.RoundedBoxGeometry(1.55, 1.55, 1.55, 4, ${(mesh.userData.rounding || .04).toFixed(2)})`;
+  };
+  return `// modelr scene\nimport * as THREE from 'three';\nimport { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';\n\nconst scene = new THREE.Scene();\n\n${objects.map(mesh => { const name = String(mesh.name || 'Object').toLowerCase().replace(/[^a-z0-9_$]/g, '_'); const rotation = mesh.rotation.toArray().slice(0, 3); return `const ${name} = new THREE.Mesh(\n  ${geometryCode(mesh)},\n  new THREE.MeshStandardMaterial({ color: '${mesh.material.color.getHexString()}', roughness: ${mesh.material.roughness.toFixed(2)}, metalness: ${mesh.material.metalness.toFixed(2)} })\n);\n${name}.position.set(${mesh.position.toArray().map(value => value.toFixed(3)).join(', ')});\n${name}.rotation.set(${rotation.map(value => value.toFixed(3)).join(', ')});\n${name}.scale.set(${mesh.scale.toArray().map(value => value.toFixed(3)).join(', ')});\nscene.add(${name});`; }).join('\n\n')}`;
+}
 document.querySelector('#codeButton').onclick = () => { document.querySelector('#generatedCode').value = generatedCode(); document.querySelector('#codeStatus').textContent = ''; document.querySelector('#codeModal').classList.add('open'); };
 document.querySelector('#closeModal').onclick = () => document.querySelector('#codeModal').classList.remove('open');
 document.querySelector('#copyCode').onclick = async () => { await navigator.clipboard?.writeText(document.querySelector('#generatedCode').value); document.querySelector('#copyCode').firstChild.textContent = 'Copied '; };
 document.querySelector('#applyCode').onclick = () => {
   const code = document.querySelector('#generatedCode').value;
   const parsed = [];
-  const meshPattern = /const\s+([A-Za-z_$][\w$]*)\s*=\s*new THREE\.Mesh\(\s*new THREE\.(Box|Sphere|Cylinder)Geometry\(([^)]+)\),\s*new THREE\.MeshStandardMaterial\(\{([\s\S]*?)\}\)\s*\);([\s\S]*?)scene\.add\(\1\)/g;
+  const meshPattern = /const\s+([A-Za-z_$][\w$]*)\s*=\s*new THREE\.Mesh\(\s*new THREE\.(Box|Sphere|Cylinder|Torus|Cone)Geometry\(([^)]+)\),\s*new THREE\.MeshStandardMaterial\(\{([\s\S]*?)\}\)\s*\);([\s\S]*?)scene\.add\(\1\)/g;
   for (const match of code.matchAll(meshPattern)) {
     const colorMatch = match[4].match(/color\s*:\s*['"]#?([0-9a-fA-F]{6})['"]/);
     const positionMatch = match[5].match(/\.position\.set\(\s*([^,]+),\s*([^,]+),\s*([^)]+)\)/);
     if (!colorMatch || !positionMatch) continue;
-    parsed.push({ name: match[1], type: match[2] === 'Box' ? 'Cube' : match[2], color: parseInt(colorMatch[1], 16), position: positionMatch.slice(1).map(Number) });
+    const rotationMatch = match[5].match(/\.rotation\.set\(\s*([^,]+),\s*([^,]+),\s*([^)]+)\)/);
+    const scaleMatch = match[5].match(/\.scale\.set\(\s*([^,]+),\s*([^,]+),\s*([^)]+)\)/);
+    parsed.push({ name: match[1], type: match[2] === 'Box' ? 'Cube' : match[2], color: parseInt(colorMatch[1], 16), position: positionMatch.slice(1).map(Number), rotation: rotationMatch?.slice(1).map(Number), scale: scaleMatch?.slice(1).map(Number) });
   }
   if (!parsed.length) { document.querySelector('#codeStatus').textContent = 'No recognizable Box, Sphere, or Cylinder code found.'; return; }
   rememberScene();
   objects.forEach(mesh => scene.remove(mesh)); objects.length = 0;
-  parsed.forEach((item, index) => { addObject(item.type, item.color, item.position); objects[index].name = item.name; });
+  parsed.forEach((item, index) => { addObject(item.type, item.color, item.position); objects[index].name = item.name; if (item.rotation) objects[index].rotation.set(...item.rotation); if (item.scale) objects[index].scale.set(...item.scale); });
   selectObject(objects[0]); updateList(); document.querySelector('#codeStatus').textContent = 'Scene applied.';
 };
 
