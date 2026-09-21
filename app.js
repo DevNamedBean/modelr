@@ -1,5 +1,6 @@
 import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js';
 import { OrbitControls } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/controls/OrbitControls.js';
+import { RoundedBoxGeometry } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/geometries/RoundedBoxGeometry.js';
 
 const objects = [];
 const undoStack = [];
@@ -89,9 +90,9 @@ function makeMesh(type, color) {
      shape.moveTo(-.78, -.55); shape.lineTo(.78, -.55); shape.lineTo(.68, .45); shape.lineTo(.36, .05); shape.lineTo(0, .72); shape.lineTo(-.36, .05); shape.lineTo(-.68, .45); shape.closePath();
     geometry = new THREE.ExtrudeGeometry(shape, { depth: .48, bevelEnabled: true, bevelSegments: 2, bevelSize: .06, bevelThickness: .06 });
     geometry.center();
-  } else geometry = new THREE.BoxGeometry(1.55, 1.55, 1.55);
+  } else geometry = new RoundedBoxGeometry(1.55, 1.55, 1.55, 3, .04);
   const material = new THREE.MeshStandardMaterial({ color, roughness: .32, metalness: .08 });
-  const mesh = new THREE.Mesh(geometry, material); mesh.castShadow = true; mesh.receiveShadow = true; return mesh;
+  const mesh = new THREE.Mesh(geometry, material); mesh.userData.rounding = type === 'Cube' ? .04 : 0; mesh.castShadow = true; mesh.receiveShadow = true; return mesh;
 }
 function addObject(type, color = 0x999999, position = [0, .8, 0]) { const mesh = makeMesh(type, color); mesh.position.set(...position); mesh.name = `${type} ${objectIndex++}`; scene.add(mesh); objects.push(mesh); selectObject(mesh); updateList(); return mesh; }
 addObject('Cube', 0x999999, [0, .8, 0]).name = 'Cube 1';
@@ -100,7 +101,7 @@ try { savedScene = JSON.parse(localStorage.getItem('modelrSceneV2') || 'null'); 
 const validSavedScene = Array.isArray(savedScene) ? savedScene.filter(item => item && ['Cube', 'Sphere', 'Cylinder', 'Torus', 'Cone', 'Crown'].includes(item.type || item.name?.split(' ')[0]) && Array.isArray(item.position) && item.position.length === 3 && item.position.every(Number.isFinite)).map(item => ({ ...item, type: item.type || item.name.split(' ')[0] })) : [];
 if (validSavedScene.length) {
   objects.splice(0).forEach(mesh => scene.remove(mesh));
-  validSavedScene.forEach(item => { const mesh = addObject(item.name.split(' ')[0], parseInt(item.color || '999999', 16), item.position); mesh.name = item.name; if (Array.isArray(item.scale)) mesh.scale.fromArray(item.scale); });
+  validSavedScene.forEach(item => { const mesh = addObject(item.name.split(' ')[0], parseInt(item.color || '999999', 16), item.position); mesh.name = item.name; if (Array.isArray(item.scale)) mesh.scale.fromArray(item.scale); if (item.rounding && mesh.name.startsWith('Cube')) { mesh.userData.rounding = item.rounding; mesh.geometry.dispose(); mesh.geometry = new RoundedBoxGeometry(1.55, 1.55, 1.55, 4, item.rounding); } });
   selectObject(objects[0]);
 }
 else {
@@ -113,7 +114,7 @@ controls.target.set(0, .8, 0);
 controls.update();
 camera.lookAt(0, .8, 0);
 
-function sceneSnapshot() { return objects.map(mesh => ({ name: mesh.name, type: mesh.name.startsWith('Sphere') ? 'Sphere' : mesh.name.startsWith('Cylinder') ? 'Cylinder' : mesh.name.startsWith('Torus') ? 'Torus' : mesh.name.startsWith('Cone') ? 'Cone' : mesh.name.startsWith('Crown') ? 'Crown' : 'Cube', color: mesh.material.color.getHexString(), position: mesh.position.toArray(), scale: mesh.scale.toArray(), rotation: mesh.rotation.toArray() })); }
+function sceneSnapshot() { return objects.map(mesh => ({ name: mesh.name, type: mesh.name.startsWith('Sphere') ? 'Sphere' : mesh.name.startsWith('Cylinder') ? 'Cylinder' : mesh.name.startsWith('Torus') ? 'Torus' : mesh.name.startsWith('Cone') ? 'Cone' : mesh.name.startsWith('Crown') ? 'Crown' : 'Cube', color: mesh.material.color.getHexString(), position: mesh.position.toArray(), scale: mesh.scale.toArray(), rotation: mesh.rotation.toArray(), rounding: mesh.userData.rounding || 0 })); }
 function rememberScene() { undoStack.push(sceneSnapshot()); if (undoStack.length > 50) undoStack.shift(); redoStack.length = 0; }
 function restoreScene(snapshot) { objects.forEach(mesh => scene.remove(mesh)); objects.length = 0; snapshot.filter(item => Array.isArray(item.position) && item.position.length === 3 && item.position.every(Number.isFinite)).forEach((item, index) => { const type = item.type || 'Cube'; const mesh = addObject(type, parseInt(item.color || '999999', 16), item.position); mesh.name = String(item.name || `${type} ${index + 1}`); if (Array.isArray(item.scale)) mesh.scale.fromArray(item.scale); if (item.rotation) mesh.rotation.fromArray(item.rotation); }); if (!objects.length) addObject('Cube', 0x999999, [0, .8, 0]); selectObject(objects[0]); updateList(); }
 function duplicateSelected(exactPosition = false) { if (!selected) return; rememberScene(); const type = selected.name.startsWith('Sphere') ? 'Sphere' : selected.name.startsWith('Cylinder') ? 'Cylinder' : selected.name.startsWith('Torus') ? 'Torus' : selected.name.startsWith('Cone') ? 'Cone' : selected.name.startsWith('Crown') ? 'Crown' : 'Cube'; const position = exactPosition ? selected.position.toArray() : [selected.position.x + .6, selected.position.y, selected.position.z + .6]; const duplicate = addObject(type, selected.material.color.getHex(), position); duplicate.scale.copy(selected.scale); duplicate.rotation.copy(selected.rotation); duplicate.material.roughness = selected.material.roughness; duplicate.material.metalness = selected.material.metalness; selectObject(duplicate); }
@@ -142,7 +143,8 @@ function updateScaleHandles() {
   });
 }
 function selectObject(mesh) { if (!mesh) return; if (selectionOutline?.parent) selectionOutline.parent.remove(selectionOutline); selected = mesh; selectionOutline = new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry), new THREE.LineBasicMaterial({ color: 0xf26639, transparent: true, opacity: .95, depthTest: false })); selectionOutline.renderOrder = 10; mesh.add(selectionOutline); document.querySelector('#selectionLabel').textContent = mesh.name; document.querySelector('#propertyName').textContent = mesh.name; document.querySelector('#propertyType').textContent = 'MESH'; const hex = `#${mesh.material.color.getHexString()}`; document.querySelector('#colorPicker').value = hex; document.querySelector('#colorValue').textContent = hex.toUpperCase(); syncInputs(); updateList(); }
-function syncInputs() { if (!selected) return; ['x','y','z'].forEach(axis => { document.querySelector(`#pos${axis.toUpperCase()}`).value = selected.position[axis].toFixed(2); document.querySelector(`#scale${axis.toUpperCase()}`).value = selected.scale[axis].toFixed(2); }); document.querySelector('#selectedDot').style.background = `#${selected.material.color.getHexString()}`; updateScaleHandles(); }
+function syncInputs() { if (!selected) return; ['x','y','z'].forEach(axis => { document.querySelector(`#pos${axis.toUpperCase()}`).value = selected.position[axis].toFixed(2); document.querySelector(`#scale${axis.toUpperCase()}`).value = selected.scale[axis].toFixed(2); }); const rounding = document.querySelector('#edgeRounding'); if (rounding) { rounding.value = selected.userData.rounding || 0; document.querySelector('#edgeRoundingValue').textContent = Number(rounding.value).toFixed(2); rounding.disabled = !selected.name.startsWith('Cube'); } document.querySelector('#selectedDot').style.background = `#${selected.material.color.getHexString()}`; updateScaleHandles(); }
+function setEdgeRounding(value) { if (!selected || !selected.name.startsWith('Cube')) return; const rounding = Math.min(.7, Math.max(0, Number(value) || 0)); const oldGeometry = selected.geometry; selected.geometry = new RoundedBoxGeometry(1.55, 1.55, 1.55, 4, rounding); selected.geometry.computeVertexNormals(); selected.userData.rounding = rounding; oldGeometry.dispose(); if (selectionOutline?.parent) selectionOutline.parent.remove(selectionOutline); selectionOutline = new THREE.LineSegments(new THREE.EdgesGeometry(selected.geometry), new THREE.LineBasicMaterial({ color: 0xf26639, transparent: true, opacity: .95, depthTest: false })); selectionOutline.renderOrder = 10; selected.add(selectionOutline); document.querySelector('#edgeRoundingValue').textContent = rounding.toFixed(2); updateScaleHandles(); }
 function updateList() { const icon = mesh => mesh.name.startsWith('Sphere') ? '●' : mesh.name.startsWith('Cylinder') ? '▱' : mesh.name.startsWith('Torus') ? '○' : mesh.name.startsWith('Cone') ? '△' : mesh.name.startsWith('Crown') ? '♕' : '◇'; const list = document.querySelector('#objectList'); const partsList = document.querySelector('#partsList'); const rows = objects.map(mesh => `<button class="object-row ${mesh === selected ? 'selected' : ''}" data-name="${mesh.name}"><span>${icon(mesh)}</span><b>${mesh.name}</b><small>MESH</small></button>`).join(''); const partRows = objects.map(mesh => `<button class="part-row ${mesh === selected ? 'selected' : ''}" data-name="${mesh.name}"><span>${icon(mesh)}</span><b>${mesh.name}</b><small>MESH</small></button>`).join(''); if (list) list.innerHTML = rows; if (partsList) partsList.innerHTML = partRows; document.querySelector('#objectCount')?.replaceChildren(document.createTextNode(`${objects.length} objects`)); document.querySelector('#partsCount')?.replaceChildren(document.createTextNode(objects.length)); document.querySelectorAll('.object-row,.part-row').forEach(row => { row.onclick = () => selectObject(objects.find(item => item.name === row.dataset.name)); row.ondblclick = () => selectObject(objects.find(item => item.name === row.dataset.name)); }); }
 function resize() { const rect = viewport.getBoundingClientRect(); renderer.setSize(rect.width, rect.height, false); camera.aspect = rect.width / rect.height; camera.updateProjectionMatrix(); }
 new ResizeObserver(resize).observe(viewport); resize();
@@ -156,6 +158,7 @@ document.querySelector('#addCylinder').onclick = () => { rememberScene(); addObj
 document.querySelector('#addTorus').onclick = () => { rememberScene(); addObject('Torus', 0xd6a843, [Math.random() * 3 - 1.5, .9, Math.random() * 2 - 1]); };
 document.querySelector('#addCone').onclick = () => { rememberScene(); addObject('Cone', 0xc56b45, [Math.random() * 3 - 1.5, .9, Math.random() * 2 - 1]); };
 document.querySelector('#addCrown').onclick = () => { rememberScene(); addObject('Crown', 0xd6a843, [Math.random() * 3 - 1.5, .9, Math.random() * 2 - 1]); };
+document.querySelector('#edgeRounding').addEventListener('input', event => { rememberScene(); setEdgeRounding(event.target.value); });
 ['posX','posY','posZ','scaleX','scaleY','scaleZ'].forEach(id => document.querySelector(`#${id}`).addEventListener('input', event => { if (!selected) return; const prop = id.startsWith('pos') ? 'position' : 'scale'; const axis = id.slice(-1).toLowerCase(); selected[prop][axis] = Number(event.target.value); }));
 
 const raycaster = new THREE.Raycaster();
