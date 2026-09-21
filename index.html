@@ -11,12 +11,38 @@
     <link rel="stylesheet" href="projects.css" />
     <style>.project-row span{display:flex;flex-direction:column;gap:4px}.project-row span small{margin:0;color:#858b82;font:10px 'DM Mono',monospace}</style>
     <style>.snap-toggle{display:flex;align-items:center;gap:9px;color:#aeb2aa;font:10px 'DM Mono',monospace;padding:10px 0}.snap-toggle input{accent-color:#f26639;width:15px;height:15px}</style>
+    <style>
+      :root{--ink:#1b1b1b;--panel:#282828;--panel-light:#323232;--canvas:#202020;--line:#3c3c3c;--accent:#f28c28;--cream:#e8e8e8}
+      .app-shell{grid-template-rows:42px 1fr 43px}.topbar{height:42px;background:#242424;border-bottom:1px solid #111;padding:0 10px;gap:22px}
+      .brand{font-size:13px;gap:6px}.brand-mark{width:21px;height:21px;font-size:12px}.brand-pill{font-size:7px;padding:2px 4px}
+      .file-menu{gap:14px;font-size:11px}.file-menu button{color:#bdbdbd}.project-name{font-size:11px}.top-actions{gap:9px}.outline-button{padding:6px 10px;font-size:11px}.avatar{width:23px;height:23px}
+      .workspace{grid-template-columns:46px minmax(400px,1fr) var(--sidebar-width)}
+      .left-toolbar{background:#292929;border-right:1px solid #111;padding-top:10px;gap:5px}
+      .tool{width:36px;height:36px;color:#a0a0a0;font-size:17px;border:1px solid transparent}
+      .tool:hover,.tool.active{color:#fff;background:#3a3a3a;border:1px solid #505050}
+      .tool.active{color:#f28c28;border-left:3px solid #f28c28}
+      .toolbar-rule{background:#494949;margin:7px 0;width:28px}
+      .viewport-panel{grid-template-rows:38px 1fr 26px;background:#202020}
+      .viewport-header{background:#292929;border-bottom:1px solid #111;padding:0 12px}.view-tabs{gap:14px}.view-tab{padding:12px 4px 9px;font-size:10px}
+      .viewport{background-color:#202020;background-image:linear-gradient(rgba(140,140,140,.12) 1px,transparent 1px),linear-gradient(90deg,rgba(140,140,140,.12) 1px,transparent 1px);background-size:48px 48px}
+      .viewport-footer{background:#292929;border-top:1px solid #111;padding:0 12px}
+      .right-panel{background:#292929;border-left:1px solid #111}.panel-tabs{height:38px;background:#242424;border-bottom:1px solid #111}.outliner{border-bottom:1px solid #111}.properties{background:#292929}.object-row.selected{background:#3b3b3b;border-left:2px solid #f28c28}
+      .section-title,.properties-title,.group-heading{color:#929292}.transform-grid input{background:#202020;border-color:#4b4b4b}.beginner-tip{background:#343434;border-left-color:#f28c28}
+      *{user-select:none}.transform-grid input,.project-input,textarea,input{user-select:text}
+      .color-row{cursor:pointer}.color-row input[type=color]{appearance:auto;-webkit-appearance:auto;display:block;width:32px;height:22px;padding:1px;border:1px solid #777;background:#f28c28;cursor:pointer;pointer-events:auto;position:relative;z-index:2}
+      .parts-panel{position:absolute;left:12px;bottom:12px;width:205px;max-height:180px;background:#292929eF;border:1px solid #505050;box-shadow:0 8px 22px #0008;z-index:12;color:#d8d8d8}
+      .runtime-error{display:none;position:fixed;left:12px;bottom:12px;z-index:9999;max-width:520px;padding:12px 14px;background:#4a2020;border:1px solid #e06b5f;color:#ffd8d2;font:11px/1.4 'DM Mono',monospace;white-space:pre-wrap}
+      .boot-cube{display:none;position:absolute;left:50%;top:50%;width:120px;height:120px;transform:translate(-50%,-50%) rotate(-30deg) skewY(10deg);background:#a7a49b;box-shadow:inset 18px 0 #7b7d77,inset -18px -16px #686d68;z-index:2;pointer-events:none}.boot-cube::before,.boot-cube::after{content:'';position:absolute;display:block}.boot-cube::before{width:84px;height:84px;left:18px;top:-43px;transform:skewX(-45deg);background:#d0cec3}.boot-cube::after{width:42px;height:120px;right:-42px;top:-21px;transform:skewY(-45deg);background:#747a73}
+      .parts-heading{display:flex;justify-content:space-between;align-items:center;padding:8px 10px;border-bottom:1px solid #454545;color:#a9a9a9;font:10px 'DM Mono',monospace;letter-spacing:.4px}.parts-heading b{color:#f28c28;font-size:9px}
+      .parts-list{padding:4px;max-height:137px;overflow:auto}.part-row{display:flex;align-items:center;gap:8px;width:100%;padding:7px 8px;color:#c9c9c9;text-align:left;font-size:11px}.part-row:hover,.part-row.selected{background:#3b3b3b;color:#fff}.part-row.selected{border-left:2px solid #f28c28}.part-row span{width:14px;color:#f28c28}.part-row small{margin-left:auto;color:#777;font:9px 'DM Mono',monospace}.part-context{position:fixed;z-index:50;display:none;width:130px;padding:4px;background:#303030;border:1px solid #5a5a5a;box-shadow:0 8px 20px #0009}.part-context.open{display:block}.part-context button{display:block;width:100%;padding:8px;color:#ddd;text-align:left;font-size:11px}.part-context button:hover{background:#f28c28;color:#171717}
+    </style>
   </head>
   <body>
+    <div class="runtime-error" id="runtimeError"></div>
     <div class="app-shell" id="appShell" aria-hidden="true">
       <header class="topbar">
         <div class="brand"><span class="brand-mark">M</span><span>modelr</span><span class="brand-pill">STUDIO</span></div>
-        <div class="file-menu"><button id="fileMenuButton">File <span>⌄</span></button><div class="file-dropdown" id="fileDropdown"><button id="closeProjectButton">Close project</button><button id="projectsButton">My projects</button><button id="newProjectButton">New project</button></div><button>Edit</button><button>Render</button><button>Help</button></div>
+        <div class="file-menu"><button id="fileMenuButton">File <span>⌄</span></button><div class="file-dropdown" id="fileDropdown"><button id="closeProjectButton">Close project</button><button id="projectsButton">My projects</button><button id="newProjectButton">New project</button><button id="deleteProjectButton">Delete project</button></div><button>Edit</button><button>Render</button><button>Help</button></div>
         <div class="project-name"><span class="live-dot"></span><span id="projectName">Untitled scene</span><button class="icon-button" title="Project hernoemen">✎</button></div>
         <div class="top-actions"><button class="outline-button" id="saveButton">↥&nbsp; Save</button><button class="avatar" id="avatarButton">A</button></div>
       </header>
@@ -31,6 +57,9 @@
           <button class="tool" id="addCube" title="Kubus toevoegen">◇</button>
           <button class="tool" id="addSphere" title="Bol toevoegen">●</button>
           <button class="tool" id="addCylinder" title="Cilinder toevoegen">▱</button>
+          <button class="tool" id="addTorus" title="Ring toevoegen">○</button>
+          <button class="tool" id="addCone" title="Kegel toevoegen">△</button>
+          <button class="tool" id="addCrown" title="Kroon toevoegen">♕</button>
           <span class="toolbar-rule"></span>
           <button class="tool" title="Camera">▣</button>
           <button class="tool" title="Licht">☼</button>
@@ -38,7 +67,7 @@
 
         <section class="viewport-panel">
           <div class="viewport-header"><div class="view-tabs"><button class="view-tab active">Layout</button><button class="view-tab">Modeling</button><button class="view-tab">Sculpting</button></div><div class="viewport-tools"><button>◉ <span>Material</span></button><button>☼ <span>Studio light</span></button><button class="kebab">⋮</button></div></div>
-          <div id="viewport" class="viewport"><div class="axis-gizmo"><span class="axis-z">Z</span><span class="axis-y">Y</span><span class="axis-x">X</span><i></i></div><div class="viewport-hint">Rechtsklik: orbit · Scroll: zoom · Sleep: transform</div><div class="selection-label" id="selectionLabel">Cube</div></div>
+          <div id="viewport" class="viewport"><div class="boot-cube" id="bootCube" aria-hidden="true"></div><div class="parts-panel"><div class="parts-heading"><span>PARTS</span><b id="partsCount">1</b></div><div class="parts-list" id="partsList"></div></div><div class="part-context" id="partContext"><button id="renamePart">Rename</button><button id="duplicatePart">Duplicate</button><button id="deletePart">Delete</button></div><div class="axis-gizmo"><span class="axis-z">Z</span><span class="axis-y">Y</span><span class="axis-x">X</span><i></i></div><div class="viewport-hint">Rechtsklik: orbit · Scroll: zoom · Sleep: transform</div><div class="selection-label" id="selectionLabel">Cube</div></div>
           <div class="viewport-footer"><span><b>Perspective</b> · User Orthographic</span><span id="objectCount">1 object</span><span>▦ Grid 1m</span></div>
         </section>
 
@@ -48,7 +77,7 @@
           <div class="outliner"><div class="section-title"><span>SCENE COLLECTION</span><button>＋</button></div><div id="objectList"></div></div>
           <div class="properties"><div class="properties-title"><span>OBJECT PROPERTIES</span><span class="property-icon">◈</span></div><div class="selected-object"><span class="object-dot" id="selectedDot"></span><strong id="propertyName">Cube</strong><span class="object-type" id="propertyType">MESH</span></div><div class="beginner-tip">● Sleep aan een bolletje om één zijde te schalen</div>
             <div class="property-group"><div class="group-heading"><span>Transform</span><span>⌃</span></div><div class="transform-grid"><label>Location X<input id="posX" type="number" step="0.1" /></label><label>Y<input id="posY" type="number" step="0.1" /></label><label>Z<input id="posZ" type="number" step="0.1" /></label><label>Scale X<input id="scaleX" type="number" step="0.1" min="0.1" /></label><label>Y<input id="scaleY" type="number" step="0.1" min="0.1" /></label><label>Z<input id="scaleZ" type="number" step="0.1" min="0.1" /></label></div></div>
-            <div class="property-group"><div class="group-heading"><span>Appearance</span><span>⌃</span></div><label class="color-row">Base color <input id="colorPicker" type="color" value="#f26639" /><span id="colorValue">#F26639</span></label><label class="range-row">Roughness <input id="roughness" type="range" min="0" max="1" step="0.01" value="0.32" /><span id="roughnessValue">0.32</span></label><label class="range-row">Metallic <input id="metallic" type="range" min="0" max="1" step="0.01" value="0.08" /><span id="metallicValue">0.08</span></label></div><label class="snap-toggle"><input id="rotationSnap" type="checkbox" /> Snap rotation to 90°</label>
+            <div class="property-group"><div class="group-heading"><span>Appearance</span><span>⌃</span></div><label class="color-row">Base color <input id="colorPicker" type="color" value="#f26639" /><span id="colorValue">#F26639</span></label><label class="range-row">Roughness <input id="roughness" type="range" min="0" max="1" step="0.01" value="0.32" /><span id="roughnessValue">0.32</span></label><label class="range-row">Metallic <input id="metallic" type="range" min="0" max="1" step="0.01" value="0.08" /><span id="metallicValue">0.08</span></label></div><label class="snap-toggle"><input id="rotationSnap" type="checkbox" checked /> Snap rotation</label><label class="snap-toggle">Rotation step <input id="rotationStep" type="number" min="1" max="360" step="1" value="15" style="width:58px;background:#202020;border:1px solid #4b4b4b;padding:5px 6px" /> °</label>
             <button class="code-button" id="codeButton">&lt;/&gt;&nbsp; View generated code <span>→</span></button>
           </div>
         </aside>
@@ -100,6 +129,12 @@
         }
       }
     </script>
-    <script type="module" src="app.js"></script>
+    <script>
+      const showRuntimeError = message => { const panel = document.querySelector('#runtimeError'); const cube = document.querySelector('#bootCube'); if (panel) { panel.textContent = `Editorfout: ${message}`; panel.style.display = 'block'; } if (cube) cube.style.display = 'block'; };
+      window.addEventListener('error', event => showRuntimeError(event.message));
+      window.addEventListener('unhandledrejection', event => showRuntimeError(event.reason?.message || event.reason));
+      setTimeout(() => { if (!document.querySelector('#viewport canvas') && document.querySelector('#bootCube')) document.querySelector('#bootCube').style.display = 'block'; }, 1200);
+    </script>
+    <script type="module" src="app.js?v=20260921-4"></script>
   </body>
 </html>
