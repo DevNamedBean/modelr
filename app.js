@@ -326,11 +326,18 @@ document.querySelector('#closeModal').onclick = () => document.querySelector('#c
 document.querySelector('#copyCode').onclick = async () => { await navigator.clipboard?.writeText(document.querySelector('#generatedCode').value); document.querySelector('#copyCode').firstChild.textContent = 'Copied '; };
 document.querySelector('#applyCode').onclick = () => {
   const code = document.querySelector('#generatedCode').value;
-  const parsed = [...code.matchAll(/new THREE\.(Box|Sphere|Cylinder)Geometry\(([^)]+)\)[\s\S]*?color:\s*['"]#?([0-9a-fA-F]{6})['"][\s\S]*?\}\);[\s\S]*?\.position\.set\(([^)]+)\)/g)];
+  const parsed = [];
+  const meshPattern = /const\s+([A-Za-z_$][\w$]*)\s*=\s*new THREE\.Mesh\(\s*new THREE\.(Box|Sphere|Cylinder)Geometry\(([^)]+)\),\s*new THREE\.MeshStandardMaterial\(\{([\s\S]*?)\}\)\s*\);([\s\S]*?)scene\.add\(\1\)/g;
+  for (const match of code.matchAll(meshPattern)) {
+    const colorMatch = match[4].match(/color\s*:\s*['"]#?([0-9a-fA-F]{6})['"]/);
+    const positionMatch = match[5].match(/\.position\.set\(\s*([^,]+),\s*([^,]+),\s*([^)]+)\)/);
+    if (!colorMatch || !positionMatch) continue;
+    parsed.push({ name: match[1], type: match[2] === 'Box' ? 'Cube' : match[2], color: parseInt(colorMatch[1], 16), position: positionMatch.slice(1).map(Number) });
+  }
   if (!parsed.length) { document.querySelector('#codeStatus').textContent = 'No recognizable Box, Sphere, or Cylinder code found.'; return; }
   rememberScene();
   objects.forEach(mesh => scene.remove(mesh)); objects.length = 0;
-  parsed.forEach((match, index) => { const type = match[1] === 'Box' ? 'Cube' : match[1]; const position = match[4].split(',').map(Number); addObject(type, parseInt(match[3], 16), position.length === 3 ? position : [0, .8, 0]); objects[index].name = `${type} ${index + 1}`; });
+  parsed.forEach((item, index) => { addObject(item.type, item.color, item.position); objects[index].name = item.name; });
   selectObject(objects[0]); updateList(); document.querySelector('#codeStatus').textContent = 'Scene applied.';
 };
 
