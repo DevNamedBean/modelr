@@ -365,6 +365,6 @@ document.querySelector('#deleteProjectButton').onclick = () => { fileDropdown.cl
 document.querySelector('#closeProjectModal').onclick = () => { projectModal.classList.remove('open'); projectModal.style.display = 'none'; };
 document.querySelector('#cancelProjectModal').onclick = () => { if (projectModalMode === 'confirm') closeProject(); else { projectModal.classList.remove('open'); projectModal.style.display = 'none'; } };
 document.querySelector('#confirmProjectModal').onclick = () => { if (projectModalMode === 'confirm') { closeAfterSave = true; openProjectModal('save'); } else if (projectModalMode === 'projects') { projectModal.classList.remove('open'); projectModal.style.display = 'none'; } else saveProject(); };
-document.querySelector('#saveButton').onclick = event => { const button = event.currentTarget; if (!currentProjectName) { openProjectModal('save'); return; } saveProject(); button.innerHTML = '✓&nbsp; Saved'; setTimeout(() => button.innerHTML = '↥&nbsp; Save', 1300); };
+document.querySelector('#saveButton').onclick = () => { openProjectModal('save'); };
 window.addEventListener('beforeunload', autoSaveScene);
 function animate() { requestAnimationFrame(animate); updateCameraMovement(); renderScene(); } animate();
