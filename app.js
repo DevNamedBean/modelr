@@ -1,6 +1,9 @@
 import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js';
 import { OrbitControls } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/controls/OrbitControls.js';
 import { RoundedBoxGeometry } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/geometries/RoundedBoxGeometry.js';
+import { GLTFLoader } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/loaders/GLTFLoader.js';
+import { GLTFExporter } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/exporters/GLTFExporter.js';
+import JSZip from 'https://cdn.jsdelivr.net/npm/jszip@3.10.1/+esm';
 
 const objects = [];
 const undoStack = [];
@@ -95,13 +98,15 @@ function makeMesh(type, color) {
   const mesh = new THREE.Mesh(geometry, material); mesh.userData.rounding = type === 'Cube' ? .04 : 0; mesh.castShadow = true; mesh.receiveShadow = true; return mesh;
 }
 function addObject(type, color = 0x999999, position = [0, .8, 0]) { const mesh = makeMesh(type, color); mesh.position.set(...position); mesh.name = `${type} ${objectIndex++}`; scene.add(mesh); objects.push(mesh); selectObject(mesh); updateList(); return mesh; }
+function meshMaterials(mesh) { return (Array.isArray(mesh.material) ? mesh.material : [mesh.material]).filter(Boolean); }
+function restoreImportedMesh(item) { const mesh = new THREE.ObjectLoader().parse(item.serialized); mesh.userData.modelrImported = true; scene.add(mesh); objects.push(mesh); return mesh; }
 addObject('Cube', 0x999999, [0, .8, 0]).name = 'Cube 1';
 let savedScene = null;
 try { savedScene = JSON.parse(localStorage.getItem('modelrSceneV2') || 'null'); } catch (error) { localStorage.removeItem('modelrSceneV2'); }
-const validSavedScene = Array.isArray(savedScene) ? savedScene.filter(item => item && ['Cube', 'Sphere', 'Cylinder', 'Torus', 'Cone', 'Crown'].includes(item.type || item.name?.split(' ')[0]) && Array.isArray(item.position) && item.position.length === 3 && item.position.every(Number.isFinite)).map(item => ({ ...item, type: item.type || item.name.split(' ')[0] })) : [];
+const validSavedScene = Array.isArray(savedScene) ? savedScene.filter(item => item && (item.serialized || ['Cube', 'Sphere', 'Cylinder', 'Torus', 'Cone', 'Crown'].includes(item.type || item.name?.split(' ')[0])) && (item.serialized || (Array.isArray(item.position) && item.position.length === 3 && item.position.every(Number.isFinite)))).map(item => ({ ...item, type: item.type || item.name?.split(' ')[0] || 'Imported' })) : [];
 if (validSavedScene.length) {
   objects.splice(0).forEach(mesh => scene.remove(mesh));
-  validSavedScene.forEach(item => { const mesh = addObject(item.name.split(' ')[0], parseInt(item.color || '999999', 16), item.position); mesh.name = item.name; if (Array.isArray(item.scale)) mesh.scale.fromArray(item.scale); if (item.rounding && mesh.name.startsWith('Cube')) { mesh.userData.rounding = item.rounding; mesh.geometry.dispose(); mesh.geometry = new RoundedBoxGeometry(1.55, 1.55, 1.55, 4, item.rounding); } });
+  validSavedScene.forEach(item => { if (item.serialized) { restoreImportedMesh(item); return; } const mesh = addObject(item.type, parseInt(item.color || '999999', 16), item.position); mesh.name = item.name; if (Array.isArray(item.scale)) mesh.scale.fromArray(item.scale); if (item.rounding && mesh.name.startsWith('Cube')) { mesh.userData.rounding = item.rounding; mesh.geometry.dispose(); mesh.geometry = new RoundedBoxGeometry(1.55, 1.55, 1.55, 4, item.rounding); } });
   selectObject(objects[0]);
 }
 else {
@@ -114,9 +119,9 @@ controls.target.set(0, .8, 0);
 controls.update();
 camera.lookAt(0, .8, 0);
 
-function sceneSnapshot() { return objects.map(mesh => ({ name: mesh.name, type: mesh.name.startsWith('Sphere') ? 'Sphere' : mesh.name.startsWith('Cylinder') ? 'Cylinder' : mesh.name.startsWith('Torus') ? 'Torus' : mesh.name.startsWith('Cone') ? 'Cone' : mesh.name.startsWith('Crown') ? 'Crown' : 'Cube', color: mesh.material.color.getHexString(), position: mesh.position.toArray(), scale: mesh.scale.toArray(), rotation: mesh.rotation.toArray(), rounding: mesh.userData.rounding || 0 })); }
+function sceneSnapshot() { return objects.map(mesh => { const material = meshMaterials(mesh)[0]; const snapshot = { name: mesh.name, type: mesh.name.startsWith('Sphere') ? 'Sphere' : mesh.name.startsWith('Cylinder') ? 'Cylinder' : mesh.name.startsWith('Torus') ? 'Torus' : mesh.name.startsWith('Cone') ? 'Cone' : mesh.name.startsWith('Crown') ? 'Crown' : 'Cube', color: material?.color?.getHexString() || '999999', position: mesh.position.toArray(), scale: mesh.scale.toArray(), rotation: mesh.rotation.toArray(), rounding: mesh.userData.rounding || 0 }; if (mesh.userData.modelrImported) { const storedMesh = mesh.clone(false); storedMesh.userData.modelrImported = true; snapshot.type = 'Imported'; snapshot.serialized = storedMesh.toJSON(); } return snapshot; }); }
 function rememberScene() { undoStack.push(sceneSnapshot()); if (undoStack.length > 50) undoStack.shift(); redoStack.length = 0; }
-function restoreScene(snapshot) { objects.forEach(mesh => scene.remove(mesh)); objects.length = 0; snapshot.filter(item => Array.isArray(item.position) && item.position.length === 3 && item.position.every(Number.isFinite)).forEach((item, index) => { const type = item.type || 'Cube'; const mesh = addObject(type, parseInt(item.color || '999999', 16), item.position); mesh.name = String(item.name || `${type} ${index + 1}`); if (Array.isArray(item.scale)) mesh.scale.fromArray(item.scale); if (item.rotation) mesh.rotation.fromArray(item.rotation); }); if (!objects.length) addObject('Cube', 0x999999, [0, .8, 0]); selectObject(objects[0]); updateList(); }
+function restoreScene(snapshot) { objects.forEach(mesh => scene.remove(mesh)); objects.length = 0; snapshot.filter(item => item.serialized || (Array.isArray(item.position) && item.position.length === 3 && item.position.every(Number.isFinite))).forEach((item, index) => { if (item.serialized) { restoreImportedMesh(item); return; } const type = item.type || 'Cube'; const mesh = addObject(type, parseInt(item.color || '999999', 16), item.position); mesh.name = String(item.name || `${type} ${index + 1}`); if (Array.isArray(item.scale)) mesh.scale.fromArray(item.scale); if (item.rotation) mesh.rotation.fromArray(item.rotation); }); if (!objects.length) addObject('Cube', 0x999999, [0, .8, 0]); selectObject(objects[0]); updateList(); }
 function duplicateSelected(exactPosition = false) { if (!selected) return; rememberScene(); const duplicate = new THREE.Mesh(selected.geometry.clone(), selected.material.clone()); duplicate.name = `${selected.name} Copy ${objectIndex++}`; duplicate.position.copy(selected.position); if (!exactPosition) duplicate.position.add(new THREE.Vector3(.6, 0, .6)); duplicate.scale.copy(selected.scale); duplicate.rotation.copy(selected.rotation); duplicate.userData = { ...selected.userData }; duplicate.castShadow = selected.castShadow; duplicate.receiveShadow = selected.receiveShadow; scene.add(duplicate); objects.push(duplicate); selectObject(duplicate); updateList(); }
 function undo() { if (!undoStack.length) return; redoStack.push(sceneSnapshot()); restoreScene(undoStack.pop()); }
 function redo() { if (!redoStack.length) return; undoStack.push(sceneSnapshot()); restoreScene(redoStack.pop()); }
@@ -142,9 +147,9 @@ function updateScaleHandles() {
     handle.scale.setScalar(Math.max(selected.scale.x, selected.scale.y, selected.scale.z));
   });
 }
-function selectObject(mesh) { if (!mesh) return; if (selectionOutline?.parent) selectionOutline.parent.remove(selectionOutline); selected = mesh; selectionOutline = new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry), new THREE.LineBasicMaterial({ color: 0xf26639, transparent: true, opacity: .95, depthTest: false })); selectionOutline.renderOrder = 10; mesh.add(selectionOutline); document.querySelector('#selectionLabel').textContent = mesh.name; document.querySelector('#propertyName').textContent = mesh.name; document.querySelector('#propertyType').textContent = 'MESH'; const hex = `#${mesh.material.color.getHexString()}`; document.querySelector('#colorPicker').value = hex; document.querySelector('#colorValue').textContent = hex.toUpperCase(); syncInputs(); updateList(); }
+function selectObject(mesh) { if (!mesh) return; if (selectionOutline?.parent) selectionOutline.parent.remove(selectionOutline); selected = mesh; selectionOutline = new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry), new THREE.LineBasicMaterial({ color: 0xf26639, transparent: true, opacity: .95, depthTest: false })); selectionOutline.renderOrder = 10; mesh.add(selectionOutline); document.querySelector('#selectionLabel').textContent = mesh.name; document.querySelector('#propertyName').textContent = mesh.name; document.querySelector('#propertyType').textContent = 'MESH'; const hex = `#${meshMaterials(mesh)[0]?.color?.getHexString() || 'ffffff'}`; document.querySelector('#colorPicker').value = hex; document.querySelector('#colorValue').textContent = hex.toUpperCase(); syncInputs(); updateList(); }
 function clearSelection() { if (selectionOutline?.parent) selectionOutline.parent.remove(selectionOutline); selectionOutline = null; selected = null; document.querySelector('#selectionLabel').textContent = 'No selection'; updateScaleHandles(); updateList(); }
-function syncInputs() { if (!selected) return; ['x','y','z'].forEach(axis => { document.querySelector(`#pos${axis.toUpperCase()}`).value = selected.position[axis].toFixed(2); document.querySelector(`#scale${axis.toUpperCase()}`).value = selected.scale[axis].toFixed(2); }); const rounding = document.querySelector('#edgeRounding'); if (rounding) { rounding.value = selected.userData.rounding || 0; document.querySelector('#edgeRoundingValue').textContent = Number(rounding.value).toFixed(2); rounding.disabled = !selected.name.startsWith('Cube'); } document.querySelector('#selectedDot').style.background = `#${selected.material.color.getHexString()}`; updateScaleHandles(); }
+function syncInputs() { if (!selected) return; ['x','y','z'].forEach(axis => { document.querySelector(`#pos${axis.toUpperCase()}`).value = selected.position[axis].toFixed(2); document.querySelector(`#scale${axis.toUpperCase()}`).value = selected.scale[axis].toFixed(2); }); const rounding = document.querySelector('#edgeRounding'); if (rounding) { rounding.value = selected.userData.rounding || 0; document.querySelector('#edgeRoundingValue').textContent = Number(rounding.value).toFixed(2); rounding.disabled = !selected.name.startsWith('Cube'); } const color = meshMaterials(selected)[0]?.color?.getHexString() || 'ffffff'; document.querySelector('#selectedDot').style.background = `#${color}`; updateScaleHandles(); }
 function setEdgeRounding(value) { if (!selected || !selected.name.startsWith('Cube')) return; const rounding = Math.min(.7, Math.max(0, Number(value) || 0)); const oldGeometry = selected.geometry; selected.geometry = new RoundedBoxGeometry(1.55, 1.55, 1.55, 4, rounding); selected.geometry.computeVertexNormals(); selected.userData.rounding = rounding; oldGeometry.dispose(); if (selectionOutline?.parent) selectionOutline.parent.remove(selectionOutline); selectionOutline = new THREE.LineSegments(new THREE.EdgesGeometry(selected.geometry), new THREE.LineBasicMaterial({ color: 0xf26639, transparent: true, opacity: .95, depthTest: false })); selectionOutline.renderOrder = 10; selected.add(selectionOutline); document.querySelector('#edgeRoundingValue').textContent = rounding.toFixed(2); updateScaleHandles(); }
 function updateList() { const icon = mesh => mesh.name.startsWith('Sphere') ? '●' : mesh.name.startsWith('Cylinder') ? '▱' : mesh.name.startsWith('Torus') ? '○' : mesh.name.startsWith('Cone') ? '△' : mesh.name.startsWith('Crown') ? '♕' : '◇'; const list = document.querySelector('#objectList'); const partsList = document.querySelector('#partsList'); const rows = objects.map(mesh => `<button class="object-row ${mesh === selected ? 'selected' : ''}" data-name="${mesh.name}"><span>${icon(mesh)}</span><b>${mesh.name}</b><small>MESH</small></button>`).join(''); const partRows = objects.map(mesh => `<button class="part-row ${mesh === selected ? 'selected' : ''}" data-name="${mesh.name}"><span>${icon(mesh)}</span><b>${mesh.name}</b><small>MESH</small></button>`).join(''); if (list) list.innerHTML = rows; if (partsList) partsList.innerHTML = partRows; document.querySelector('#objectCount')?.replaceChildren(document.createTextNode(`${objects.length} objects`)); document.querySelector('#partsCount')?.replaceChildren(document.createTextNode(objects.length)); document.querySelectorAll('.object-row,.part-row').forEach(row => { row.onclick = () => selectObject(objects.find(item => item.name === row.dataset.name)); row.ondblclick = () => selectObject(objects.find(item => item.name === row.dataset.name)); }); }
 function resize() { const rect = viewport.getBoundingClientRect(); renderer.setSize(rect.width, rect.height, false); camera.aspect = rect.width / rect.height; camera.updateProjectionMatrix(); }
@@ -308,7 +313,7 @@ window.addEventListener('keydown', event => {
 });
 window.addEventListener('keyup', event => cameraKeys.delete(String(event.key || '').toLowerCase()));
 window.addEventListener('blur', () => cameraKeys.clear());
-function applySelectedColor(value) { if (!selected || !/^#[0-9a-f]{6}$/i.test(value)) return; selected.material.color.set(value); selected.material.needsUpdate = true; document.querySelector('#colorValue').textContent = value.toUpperCase(); document.querySelector('#selectedDot').style.background = value; updateList(); }
+function applySelectedColor(value) { if (!selected || !/^#[0-9a-f]{6}$/i.test(value)) return; meshMaterials(selected).forEach(material => { if (material.color) material.color.set(value); material.needsUpdate = true; }); document.querySelector('#colorValue').textContent = value.toUpperCase(); document.querySelector('#selectedDot').style.background = value; updateList(); }
 document.querySelector('#colorPicker').addEventListener('input', event => applySelectedColor(event.target.value));
 document.querySelector('#colorPicker').addEventListener('change', event => applySelectedColor(event.target.value));
 const partContext = document.querySelector('#partContext');
@@ -318,7 +323,7 @@ document.addEventListener('click', event => { if (!event.target.closest('#partCo
 document.querySelector('#renamePart').onclick = () => { if (!contextPart) return; const name = window.prompt('New name for this part:', contextPart.name); if (name?.trim()) { contextPart.name = name.trim(); selectObject(contextPart); updateList(); } partContext.classList.remove('open'); };
 document.querySelector('#duplicatePart').onclick = () => { if (!contextPart) return; selectObject(contextPart); duplicateSelected(true); contextPart = selected; partContext.classList.remove('open'); };
 document.querySelector('#deletePart').onclick = () => { if (!contextPart) return; rememberScene(); const index = objects.indexOf(contextPart); if (index >= 0) objects.splice(index, 1); scene.remove(contextPart); if (!objects.length) addObject('Cube', 0x999999, [0, .8, 0]); selectObject(objects[Math.max(0, index - 1)] || objects[0]); updateList(); contextPart = null; partContext.classList.remove('open'); };
-[['roughness','roughnessValue'],['metallic','metallicValue']].forEach(([id, output]) => document.querySelector(`#${id}`).addEventListener('input', event => { if (selected) selected.material[id] = Number(event.target.value); document.querySelector(`#${output}`).textContent = Number(event.target.value).toFixed(2); }));
+[['roughness','roughnessValue'],['metallic','metallicValue']].forEach(([id, output]) => document.querySelector(`#${id}`).addEventListener('input', event => { if (selected) meshMaterials(selected).forEach(material => { material[id] = Number(event.target.value); }); document.querySelector(`#${output}`).textContent = Number(event.target.value).toFixed(2); }));
 
 function generatedCode() {
   const geometryCode = mesh => {
@@ -353,7 +358,7 @@ document.querySelector('#applyCode').onclick = () => {
   selectObject(objects[0]); updateList(); document.querySelector('#codeStatus').textContent = 'Scene applied.';
 };
 
-document.querySelector('#avatarButton').onclick = () => { localStorage.removeItem('modelrUser'); appShell.setAttribute('aria-hidden', 'true'); authScreen.style.display = 'grid'; document.querySelector('#passwordInput').value = ''; };
+document.querySelector('#avatarButton').onclick = async () => { try { await apiRequest('/api/auth/logout', { method: 'POST' }); } catch (error) { } localStorage.removeItem('modelrUser'); appShell.setAttribute('aria-hidden', 'true'); authScreen.style.display = 'grid'; document.querySelector('#passwordInput').value = ''; };
 const workspace = document.querySelector('.workspace');
 document.querySelector('#sidebarToggle').onclick = () => { const collapsed = workspace.classList.toggle('sidebar-collapsed'); document.querySelector('#sidebarToggle').textContent = collapsed ? '‹' : '›'; document.querySelector('#sidebarToggle').title = collapsed ? 'Zijpaneel openen' : 'Zijpaneel inklappen'; setTimeout(resize, 220); };
 let sidebarDrag = false;
@@ -369,22 +374,247 @@ let closeAfterSave = false;
 let currentProjectName = localStorage.getItem('modelrProjectName') || '';
 if (currentProjectName) document.querySelector('#projectName').textContent = currentProjectName;
 function projects() { try { const saved = JSON.parse(localStorage.getItem('modelrProjects') || '[]'); return Array.isArray(saved) ? saved : []; } catch (error) { localStorage.removeItem('modelrProjects'); return []; } }
-function renderProjects() { const list = document.querySelector('#projectList'); const saved = projects(); list.innerHTML = saved.length ? saved.map(project => `<button class="project-row" data-project="${project.id}" title="Double-click to open or save here">◈ <span><b>${project.name}</b><small>Last update: ${project.updatedAt ? new Date(project.updatedAt).toLocaleString('en-US') : 'Unknown'}</small></span><small>${project.objects} objects</small></button>`).join('') : '<div class="project-empty">No saved projects yet.</div>'; list.querySelectorAll('.project-row').forEach(row => row.ondblclick = () => { const project = projects().find(item => item.id === row.dataset.project); if (!project) return; if (projectModalMode === 'confirm') { const updated = projects().map(item => item.id === project.id ? { ...item, objects: objects.length, updatedAt: new Date().toISOString(), scene: sceneSnapshot() } : item); localStorage.setItem('modelrProjects', JSON.stringify(updated)); localStorage.setItem('modelrSceneV2', JSON.stringify(sceneSnapshot())); currentProjectName = project.name; localStorage.setItem('modelrProjectName', currentProjectName); document.querySelector('#projectName').textContent = currentProjectName; closeAfterSave = false; projectModal.classList.remove('open'); projectModal.style.display = 'none'; return; } openProjectWithLoader(project); }); }
+async function apiRequest(path, options = {}) {
+  const response = await fetch(path, { credentials: 'same-origin', ...options });
+  let result = {};
+  try { result = await response.json(); } catch (error) { }
+  if (!response.ok) { const failure = new Error(result.error || 'Cloud request failed.'); failure.status = response.status; throw failure; }
+  return result;
+}
+async function syncCloudProjects() {
+  const cloudProjects = await apiRequest('/api/projects');
+  localStorage.setItem('modelrProjects', JSON.stringify(cloudProjects));
+  const previousName = localStorage.getItem('modelrProjectName');
+  const activeProject = cloudProjects.find(project => project.name === previousName) || cloudProjects[0];
+  if (activeProject) {
+    currentProjectName = activeProject.name;
+    localStorage.setItem('modelrProjectName', currentProjectName);
+    localStorage.setItem('modelrSceneV2', JSON.stringify(activeProject.scene));
+    document.querySelector('#projectName').textContent = currentProjectName;
+    restoreScene(activeProject.scene);
+  } else {
+    currentProjectName = '';
+    localStorage.removeItem('modelrProjectName');
+    restoreScene([]);
+    localStorage.setItem('modelrSceneV2', JSON.stringify(sceneSnapshot()));
+    document.querySelector('#projectName').textContent = 'Untitled scene';
+  }
+}
+function renderProjects() {
+  const list = document.querySelector('#projectList');
+  const saved = projects();
+  list.innerHTML = saved.length ? saved.map(project => `<button class="project-row" data-project="${project.id}" title="Double-click to open or save here">◈ <span><b>${project.name}</b><small>Last update: ${project.updatedAt ? new Date(project.updatedAt).toLocaleString('en-US') : 'Unknown'}</small></span><small>${project.objects} objects</small></button>`).join('') : '<div class="project-empty">No saved projects yet.</div>';
+  list.querySelectorAll('.project-row').forEach(row => row.ondblclick = async () => {
+    const project = projects().find(item => item.id === row.dataset.project);
+    if (!project) return;
+    if (projectModalMode === 'confirm') {
+      const updatedProject = { ...project, objects: objects.length, scene: sceneSnapshot() };
+      try {
+        const savedProject = await apiRequest('/api/projects', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updatedProject) });
+        localStorage.setItem('modelrProjects', JSON.stringify(projects().map(item => item.id === project.id ? savedProject : item)));
+        localStorage.setItem('modelrSceneV2', JSON.stringify(updatedProject.scene));
+        currentProjectName = project.name;
+        localStorage.setItem('modelrProjectName', currentProjectName);
+        document.querySelector('#projectName').textContent = currentProjectName;
+        closeAfterSave = false;
+        projectModal.classList.remove('open');
+        projectModal.style.display = 'none';
+      } catch (error) { projectStatus.textContent = error.message; }
+      return;
+    }
+    openProjectWithLoader(project);
+  });
+}
 function openProjectWithLoader(project) { const loader = document.querySelector('#projectLoading'); loader.classList.add('open'); loader.setAttribute('aria-hidden', 'false'); setTimeout(() => { restoreScene(project.scene); localStorage.setItem('modelrSceneV2', JSON.stringify(project.scene)); currentProjectName = project.name; localStorage.setItem('modelrProjectName', currentProjectName); document.querySelector('#projectName').textContent = currentProjectName; projectModal.classList.remove('open'); projectModal.style.display = 'none'; authScreen.style.display = 'none'; appShell.setAttribute('aria-hidden', 'false'); requestAnimationFrame(() => { resize(); renderScene(); loader.classList.remove('open'); loader.setAttribute('aria-hidden', 'true'); }); }, 5000); }
 function openProjectModal(mode) { projectModalMode = mode; document.querySelector('#projectModalEyebrow').textContent = mode === 'confirm' ? 'CLOSE PROJECT' : mode === 'projects' ? 'PROJECTS' : 'SAVE PROJECT'; document.querySelector('#projectModalTitle').textContent = mode === 'confirm' ? 'Do you want to save this project?' : mode === 'projects' ? 'Your projects.' : 'Save your project.'; document.querySelector('#projectModalHelp').textContent = mode === 'confirm' ? 'Your changes will not be saved.' : mode === 'projects' ? 'Open a previously saved project.' : 'Give your project a name so you can open it later.'; projectInput.style.display = mode === 'save' ? 'block' : 'none'; document.querySelector('#confirmProjectModal').textContent = mode === 'confirm' ? 'Yes, save' : mode === 'projects' ? 'Close' : 'Save project'; document.querySelector('#cancelProjectModal').textContent = mode === 'confirm' ? 'No, close' : 'Cancel'; projectStatus.textContent = ''; if (mode === 'save') projectInput.value = currentProjectName; renderProjects(); projectModal.classList.add('open'); projectModal.style.display = 'grid'; }
 function showProjectList() { authScreen.style.display = 'none'; appShell.setAttribute('aria-hidden', 'true'); openProjectModal('projects'); projectModal.classList.add('open'); projectModal.style.setProperty('display', 'grid', 'important'); projectModal.style.setProperty('visibility', 'visible', 'important'); projectModal.style.setProperty('opacity', '1', 'important'); projectModal.style.setProperty('z-index', '9999', 'important'); const card = document.querySelector('.project-card'); card.style.setProperty('display', 'block', 'important'); card.style.setProperty('visibility', 'visible', 'important'); card.style.setProperty('opacity', '1', 'important'); }
-function saveProject() { const name = projectInput.value.trim(); if (!name) { projectStatus.textContent = 'Enter a project name first.'; projectInput.focus(); return; } const scene = sceneSnapshot(); const saved = projects().filter(project => project.name !== name); saved.unshift({ id: `${Date.now()}-${name}`, name, objects: objects.length, updatedAt: new Date().toISOString(), scene }); try { localStorage.setItem('modelrProjects', JSON.stringify(saved)); localStorage.setItem('modelrSceneV2', JSON.stringify(scene)); localStorage.setItem('modelrProjectName', name); } catch (error) { projectStatus.textContent = 'Could not save. Browser storage may be full.'; return; } currentProjectName = name; document.querySelector('#projectName').textContent = name; if (closeAfterSave) { closeAfterSave = false; showProjectList(); } else { projectModal.classList.remove('open'); projectModal.style.display = 'none'; } }
+async function saveProject() {
+  const name = projectInput.value.trim();
+  if (!name) { projectStatus.textContent = 'Enter a project name first.'; projectInput.focus(); return; }
+  const scene = sceneSnapshot();
+  const existing = projects().find(project => project.name === name);
+  const project = { id: existing?.id || `${Date.now()}-${name}`, name, objects: objects.length, updatedAt: new Date().toISOString(), scene };
+  try {
+    const savedProject = await apiRequest('/api/projects', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(project) });
+    const saved = projects().filter(item => item.id !== savedProject.id);
+    saved.unshift(savedProject);
+    localStorage.setItem('modelrProjects', JSON.stringify(saved));
+    localStorage.setItem('modelrSceneV2', JSON.stringify(scene));
+    localStorage.setItem('modelrProjectName', name);
+  } catch (error) { projectStatus.textContent = `Could not save to cloud: ${error.message}`; return; }
+  currentProjectName = name;
+  document.querySelector('#projectName').textContent = name;
+  if (closeAfterSave) { closeAfterSave = false; showProjectList(); }
+  else { projectModal.classList.remove('open'); projectModal.style.display = 'none'; }
+}
 function autoSaveScene() { try { localStorage.setItem('modelrSceneV2', JSON.stringify(sceneSnapshot())); } catch (error) { /* Keep the editor usable when browser storage is unavailable. */ } }
 function closeProject() { showProjectList(); }
 document.querySelector('#fileMenuButton').onclick = event => { event.stopPropagation(); fileDropdown.classList.toggle('open'); };
 document.addEventListener('click', event => { if (!event.target.closest('.file-menu')) fileDropdown.classList.remove('open'); });
+const modelImportInput = document.querySelector('#modelImportInput');
+document.querySelector('#importModelButton').onclick = () => { fileDropdown.classList.remove('open'); modelImportInput.click(); };
+modelImportInput.addEventListener('change', async event => {
+  const files = Array.from(event.target.files || []);
+  event.target.value = '';
+  if (!files.length) return;
+  const objectUrls = new Set();
+  const fileUrls = new Map();
+  const archiveUrls = new Map();
+  try {
+    let modelFileName;
+    let modelContent;
+    let modelPath = '';
+    const zipFile = files.find(file => /\.zip$/i.test(file.name));
+    if (zipFile) {
+      const archive = await JSZip.loadAsync(await zipFile.arrayBuffer());
+      const entries = Object.values(archive.files).filter(entry => !entry.dir);
+      const modelEntry = entries.find(entry => /\.(gltf|glb)$/i.test(entry.name));
+      if (!modelEntry) throw new Error('No .gltf or .glb model was found in this ZIP.');
+      modelFileName = modelEntry.name;
+      modelContent = await modelEntry.async(modelFileName.toLowerCase().endsWith('.glb') ? 'arraybuffer' : 'text');
+      const modelDirectory = modelFileName.includes('/') ? modelFileName.slice(0, modelFileName.lastIndexOf('/') + 1) : '';
+      modelPath = `https://modelr-import.local/${modelDirectory.split('/').filter(Boolean).map(encodeURIComponent).join('/')}${modelDirectory ? '/' : ''}`;
+      await Promise.all(entries.filter(entry => entry !== modelEntry).map(async entry => {
+        const extension = entry.name.split('.').pop().toLowerCase();
+        const contentType = ({ png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif', bin: 'application/octet-stream', ktx2: 'image/ktx2' })[extension] || 'application/octet-stream';
+        const url = URL.createObjectURL(new Blob([await entry.async('uint8array')], { type: contentType }));
+        objectUrls.add(url);
+        archiveUrls.set(entry.name, url);
+      }));
+    } else {
+      const modelFile = files.find(file => /\.(gltf|glb)$/i.test(file.name));
+      if (!modelFile) return;
+      modelFileName = modelFile.name;
+      modelContent = await modelFile.arrayBuffer();
+      if (modelFile.name.toLowerCase().endsWith('.gltf')) modelContent = new TextDecoder().decode(modelContent);
+      files.forEach(file => {
+        const url = URL.createObjectURL(file);
+        objectUrls.add(url);
+        fileUrls.set(file.name, url);
+      });
+    }
+    const manager = new THREE.LoadingManager();
+    manager.setURLModifier(url => {
+      const parsedUrl = new URL(url, document.baseURI);
+      const assetPath = decodeURIComponent(parsedUrl.pathname).replace(/^\/+/, '');
+      const fileName = assetPath.split('/').pop();
+      return archiveUrls.get(assetPath) || fileUrls.get(fileName) || url;
+    });
+    const loader = new GLTFLoader(manager);
+    const gltf = await new Promise((resolve, reject) => loader.parse(modelContent, modelPath, resolve, reject));
+    const root = gltf.scene || gltf.scenes[0];
+    if (!root) throw new Error('The selected file contains no scene.');
+    root.updateMatrixWorld(true);
+    const imported = [];
+    root.traverse(node => {
+      if (!node.isMesh) return;
+      const mesh = node.clone(false);
+      node.matrixWorld.decompose(mesh.position, mesh.quaternion, mesh.scale);
+      const baseName = node.name?.trim() || modelFileName.split('/').pop().replace(/\.(gltf|glb)$/i, '');
+      mesh.name = `${baseName} ${objectIndex++}`;
+      mesh.userData = { ...mesh.userData, modelrImported: true };
+      imported.push(mesh);
+    });
+    if (!imported.length) throw new Error('No mesh objects were found in this file.');
+    rememberScene();
+    imported.forEach(mesh => { scene.add(mesh); objects.push(mesh); });
+    selectObject(imported[0]);
+    updateList();
+  } catch (error) {
+    window.alert(`Could not import model: ${error.message || error}`);
+  } finally {
+    objectUrls.forEach(url => URL.revokeObjectURL(url));
+  }
+});
+document.querySelector('#exportModelButton').onclick = async () => {
+  fileDropdown.classList.remove('open');
+  if (!objects.length) return;
+  const exportScene = new THREE.Scene();
+  objects.forEach(mesh => exportScene.add(mesh.clone(false)));
+  try {
+    const result = await new Promise((resolve, reject) => new GLTFExporter().parse(exportScene, resolve, reject, { binary: true }));
+    const downloadUrl = URL.createObjectURL(new Blob([result], { type: 'model/gltf-binary' }));
+    const link = document.createElement('a');
+    const projectFileName = (currentProjectName || 'modelr-scene').trim().replace(/[^a-z0-9_-]+/gi, '-').replace(/^-|-$/g, '') || 'modelr-scene';
+    link.href = downloadUrl;
+    link.download = `${projectFileName}.glb`;
+    link.click();
+    URL.revokeObjectURL(downloadUrl);
+  } catch (error) {
+    window.alert(`Could not export model: ${error.message || error}`);
+  }
+};
 document.querySelector('#closeProjectButton').onclick = () => { fileDropdown.classList.remove('open'); openProjectModal('confirm'); };
 document.querySelector('#projectsButton').onclick = () => { fileDropdown.classList.remove('open'); openProjectModal('projects'); };
 document.querySelector('#newProjectButton').onclick = () => { fileDropdown.classList.remove('open'); currentProjectName = ''; document.querySelector('#projectName').textContent = 'Untitled scene'; restoreScene([]); };
-document.querySelector('#deleteProjectButton').onclick = () => { fileDropdown.classList.remove('open'); if (currentProjectName && !window.confirm(`Delete project "${currentProjectName}"?`)) return; const saved = projects().filter(project => project.name !== currentProjectName); localStorage.setItem('modelrProjects', JSON.stringify(saved)); localStorage.removeItem('modelrSceneV2'); localStorage.removeItem('modelrProjectName'); currentProjectName = ''; document.querySelector('#projectName').textContent = 'Untitled scene'; restoreScene([]); };
+document.querySelector('#deleteProjectButton').onclick = async () => { fileDropdown.classList.remove('open'); if (currentProjectName && !window.confirm(`Delete project "${currentProjectName}"?`)) return; const deleting = projects().filter(project => project.name === currentProjectName); try { for (const project of deleting) await apiRequest(`/api/projects/${encodeURIComponent(project.id)}`, { method: 'DELETE' }); } catch (error) { window.alert(`Could not delete cloud project: ${error.message}`); return; } const saved = projects().filter(project => project.name !== currentProjectName); localStorage.setItem('modelrProjects', JSON.stringify(saved)); localStorage.removeItem('modelrSceneV2'); localStorage.removeItem('modelrProjectName'); currentProjectName = ''; document.querySelector('#projectName').textContent = 'Untitled scene'; restoreScene([]); };
 document.querySelector('#closeProjectModal').onclick = () => { projectModal.classList.remove('open'); projectModal.style.display = 'none'; };
 document.querySelector('#cancelProjectModal').onclick = () => { if (projectModalMode === 'confirm') closeProject(); else { projectModal.classList.remove('open'); projectModal.style.display = 'none'; } };
 document.querySelector('#confirmProjectModal').onclick = () => { if (projectModalMode === 'confirm') { closeAfterSave = true; openProjectModal('save'); } else if (projectModalMode === 'projects') { projectModal.classList.remove('open'); projectModal.style.display = 'none'; } else saveProject(); };
 document.querySelector('#saveButton').onclick = () => { openProjectModal('save'); };
 window.addEventListener('beforeunload', autoSaveScene);
 function animate() { requestAnimationFrame(animate); updateCameraMovement(); renderScene(); } animate();
+
+const authForm = document.querySelector('#authForm');
+const authError = document.querySelector('#authError');
+let authMode = 'signup';
+function enterStudio(email) {
+  localStorage.removeItem('modelrUser');
+  document.querySelector('#emailInput').value = email;
+  authScreen.style.display = 'none';
+  appShell.setAttribute('aria-hidden', 'false');
+}
+document.querySelectorAll('.auth-tab').forEach(tab => tab.addEventListener('click', () => {
+  authMode = tab.dataset.auth;
+  document.querySelectorAll('.auth-tab').forEach(item => item.classList.toggle('active', item === tab));
+  document.querySelector('#authSubmitText').textContent = authMode === 'login' ? 'Continue to studio' : 'Start creating';
+  document.querySelector('#passwordInput').setAttribute('autocomplete', authMode === 'login' ? 'current-password' : 'new-password');
+  authError.textContent = '';
+}));
+authForm.addEventListener('submit', async event => {
+  event.preventDefault();
+  const email = document.querySelector('#emailInput').value.trim().toLowerCase();
+  const password = document.querySelector('#passwordInput').value;
+  const submitButton = authForm.querySelector('button[type="submit"]');
+  submitButton.disabled = true;
+  authError.textContent = '';
+  try {
+    let result;
+    if (authMode === 'signup') {
+      const cachedUser = localStorage.getItem('modelrCloudUser');
+      const migrationProjects = !cachedUser || cachedUser === email ? projects() : [];
+      result = await apiRequest('/api/auth/signup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password, projects: migrationProjects }) });
+    } else {
+      try {
+        result = await apiRequest('/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password }) });
+      } catch (loginError) {
+        let legacyUsers = {};
+        try { legacyUsers = JSON.parse(localStorage.getItem('modelrUsers') || '{}'); } catch (error) { }
+        if (loginError.status !== 401 || legacyUsers[email] !== password) throw loginError;
+        const cachedUser = localStorage.getItem('modelrCloudUser');
+        const migrationProjects = !cachedUser || cachedUser === email ? projects() : [];
+        result = await apiRequest('/api/auth/signup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password, projects: migrationProjects }) });
+      }
+    }
+    localStorage.removeItem('modelrUsers');
+    await syncCloudProjects();
+    localStorage.setItem('modelrCloudUser', result.email || email);
+    enterStudio(result.email || email);
+  } catch (error) {
+    authError.textContent = error.message === 'Cloud storage is not configured. Set DATABASE_URL on the server.'
+      ? 'Cloud storage is not connected yet. Configure DATABASE_URL on the server.'
+      : error.message;
+  } finally {
+    submitButton.disabled = false;
+  }
+});
+(async () => {
+  try {
+    const session = await apiRequest('/api/auth/session');
+    await syncCloudProjects();
+    localStorage.setItem('modelrCloudUser', session.email);
+    enterStudio(session.email);
+  } catch (error) {
+    if (error.status && error.status !== 401) authError.textContent = error.message;
+  }
+})();
