@@ -1,5 +1,21 @@
 # modelr
 
+## Functies van de huidige versie
+
+Modelr is een browsergebaseerde 3D-scène-editor voor eenvoudige scènes. De huidige versie bevat:
+
+- Een interactieve 3D-viewport met Object Mode en Edit Mode, een Outliner met objectzichtbaarheid en eigenschappen voor het geselecteerde object. In Edit Mode kun je vertices, edges en driehoeksvlakken selecteren en verslepen; gedeelde kopieën van dezelfde mesh-punten bewegen mee.
+- Basisvormen toevoegen: kubus, bol, cilinder, torus, kegel en kroon. Objecten selecteren, verplaatsen, draaien, schalen, dupliceren, hernoemen en verwijderen; de scène heeft ook ongedaan maken en opnieuw uitvoeren.
+- Objecten aanpassen met positie- en schaalwaarden, kleur, ruwheid en metallic-waarde. Kubussen kunnen afgeronde randen krijgen.
+- Animatietijdlijn op 24 fps met scrubben, frame-navigatie, afspelen/pauzeren, loopen en instelbaar eindframe. De dope sheet toont locatie-, rotatie-, schaal- en kleurtracks. In de Animation Workspace staan een Graph Editor (kanalen aanpassen door keyframes te slepen), NLA-editor (herbruikbare actions/strips, positie, herhalingen, snelheid, mix en mute), drivers met veilig beperkte wiskundige expressies en shape keys die je in Edit Mode kunt vastleggen en keyframen. Interpolatie ondersteunt Linear, Ease In/Out en Constant. Animatiedata wordt in lokale en cloudprojecten opgeslagen.
+- glTF- en GLB-modellen importeren, met bijbehorende bestanden of vanuit een ZIP-archief; scènes exporteren als GLB.
+- Gegenereerde Three.js-scènecode bekijken en aangepaste code toepassen voor de ondersteunde basisvormen.
+- Projecten lokaal in de browser bewaren. Met een geconfigureerde PostgreSQL-database kunnen gebruikers accounts maken en projecten in de cloud bewaren.
+
+De editor is bedoeld voor lichte scènes en begrenst een scène op 300 objecten en 250.000 driehoeken. De viewport is een realtime 3D-preview; er is geen aparte render-engine voor definitieve renders.
+
+Edit Mode biedt nog geen gereedschappen om topologie toe te voegen of te verwijderen, zoals extrude, inset, bevel of loop cut. Animatie richt zich op de genoemde objectkanalen, shape-keywaarden en eenvoudige NLA-strips; geavanceerde rigging, constraint-gebaseerde drivers, animatiecurvemodifiers en export van animatieclips naar glTF zijn niet beschikbaar. Sculpting- of schildergereedschappen, modifiers, Geometry Nodes, rigging, fysica- of vloeistofsimulaties, geavanceerde materiaalnodes, compositing, videobewerking, cameratracking en Python-API zijn niet beschikbaar. De viewport-preview is geen definitieve render-engine.
+
 ## Cloudaccounts op Render
 
 Accounts en projecten worden in PostgreSQL opgeslagen, zodat ze op meerdere apparaten werken en Render-deployments overleven. De webservice kan op Render Free blijven; koppel een PostgreSQL-database met een `DATABASE_URL`, bijvoorbeeld via het gratis Supabase-plan.

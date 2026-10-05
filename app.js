@@ -4,6 +4,7 @@ import { RoundedBoxGeometry } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/e
 import { GLTFLoader } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/loaders/GLTFLoader.js';
 import { GLTFExporter } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/exporters/GLTFExporter.js';
 import JSZip from 'https://cdn.jsdelivr.net/npm/jszip@3.10.1/+esm';
+import { evaluateDriverExpression, interpolateKeyframeAmount } from './animation-core.js';
 
 const objects = [];
 const undoStack = [];
@@ -16,8 +17,24 @@ const MAX_IMPORT_FILE_BYTES = 50 * 1024 * 1024;
 const MAX_IMPORT_ARCHIVE_BYTES = 64 * 1024 * 1024;
 const MAX_IMPORT_ARCHIVE_ENTRIES = 200;
 const MAX_REQUEST_BODY_CHARS = 20 * 1024 * 1024;
+const DEFAULT_END_FRAME = 120;
+const FRAME_RATE = 24;
 let selected = null;
 let selectionOutline = null;
+let vertexOverlay = null;
+let selectedVertexMarker = null;
+let selectedVertexIndex = null;
+let editorMode = 'object';
+let componentMode = 'vertex';
+let selectedComponentPoints = [];
+let componentOverlay = null;
+let currentFrame = 0;
+let endFrame = DEFAULT_END_FRAME;
+let loopPlayback = false;
+let isPlaying = false;
+let playbackRequest = 0;
+let lastPlaybackTime = 0;
+let playbackRemainder = 0;
 let objectIndex = 1;
 const authScreen = document.querySelector('#authScreen');
 const appShell = document.querySelector('#appShell');
@@ -114,7 +131,7 @@ function restoreImportedMesh(item) { const mesh = new THREE.ObjectLoader().parse
 addObject('Cube', 0x999999, [0, .8, 0]).name = 'Cube 1';
 let savedScene = null;
 try { savedScene = localStorage.getItem('modelrCloudUser') ? null : JSON.parse(localStorage.getItem('modelrSceneV2') || 'null'); } catch (error) { localStorage.removeItem('modelrSceneV2'); }
-const validSavedScene = Array.isArray(savedScene) ? savedScene.filter(item => item && (item.serialized || ['Cube', 'Sphere', 'Cylinder', 'Torus', 'Cone', 'Crown'].includes(item.type || item.name?.split(' ')[0])) && (item.serialized || (Array.isArray(item.position) && item.position.length === 3 && item.position.every(Number.isFinite)))).map(item => ({ ...item, type: item.type || item.name?.split(' ')[0] || 'Imported' })) : [];
+const validSavedScene = Array.isArray(savedScene) ? savedScene.filter(item => item && (item.serialized || item.geometry || ['Cube', 'Sphere', 'Cylinder', 'Torus', 'Cone', 'Crown'].includes(item.type || item.name?.split(' ')[0])) && (item.serialized || (Array.isArray(item.position) && item.position.length === 3 && item.position.every(Number.isFinite)))).map(item => ({ ...item, type: item.type || item.name?.split(' ')[0] || 'Imported' })) : [];
 if (validSavedScene.length) {
   restoreScene(validSavedScene);
 }
@@ -129,6 +146,514 @@ controls.update();
 camera.lookAt(0, .8, 0);
 
 function importedMeshSnapshot(mesh) { let serialized = importedSerialization.get(mesh); if (!serialized) { const storedMesh = mesh.clone(false); storedMesh.userData.modelrImported = true; serialized = storedMesh.toJSON(); importedSerialization.set(mesh, serialized); } return serialized; }
+function keyframesFor(mesh) {
+  if (!mesh.userData.modelrAnimationId) mesh.userData.modelrAnimationId = `animation-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  if (!Array.isArray(mesh.userData.modelrKeyframes)) mesh.userData.modelrKeyframes = [];
+  return mesh.userData.modelrKeyframes;
+}
+function isAnimationProperty(path) {
+  return /^(position|rotation|scale)\.[xyz]$/.test(path || '');
+}
+function isValidKeyframe(keyframe) {
+  return keyframe && Number.isInteger(keyframe.frame) && keyframe.frame >= 0 && keyframe.frame <= 1200 &&
+    [keyframe.position, keyframe.rotation, keyframe.scale].every(values => Array.isArray(values) && values.length === 3 && values.every(Number.isFinite)) &&
+    /^#[0-9a-f]{6}$/i.test(keyframe.color || '') &&
+    (!keyframe.shapeWeights || Array.isArray(keyframe.shapeWeights) && keyframe.shapeWeights.length <= 256 && keyframe.shapeWeights.every(value => Number.isFinite(value) && value >= 0 && value <= 1));
+}
+function applyAnimationFrame(frame) {
+  objects.forEach(mesh => {
+    const keyframes = keyframesFor(mesh);
+    const pose = sampleAnimationTrack(keyframes, frame);
+    if (pose) {
+      mesh.position.fromArray(pose.position);
+      mesh.rotation.fromArray(pose.rotation);
+      mesh.scale.fromArray(pose.scale);
+      const color = new THREE.Color(pose.color);
+      meshMaterials(mesh).forEach(material => { if (material.color) material.color.copy(color); });
+      applyShapeWeights(mesh, pose.shapeWeights);
+    }
+    for (const strip of mesh.userData.modelrNlaStrips || []) {
+      if (strip.muted || frame < strip.start || !strip.actionId) continue;
+      const action = (mesh.userData.modelrActions || []).find(item => item.id === strip.actionId);
+      if (!action?.keyframes?.length) continue;
+      const duration = Math.max(1, action.keyframes.at(-1).frame - action.keyframes[0].frame);
+      const elapsed = (frame - strip.start) / Math.max(.01, strip.scale || 1);
+      const cycleLength = duration + 1;
+      if (elapsed >= cycleLength * Math.max(1, strip.repeat || 1)) continue;
+      const localFrame = action.keyframes[0].frame + elapsed % cycleLength;
+      const actionPose = sampleAnimationTrack(action.keyframes, localFrame);
+      if (!actionPose) continue;
+      const influence = THREE.MathUtils.clamp(strip.influence ?? 1, 0, 1);
+      const basePose = pose || {
+        position: mesh.position.toArray(), rotation: [mesh.rotation.x, mesh.rotation.y, mesh.rotation.z],
+        scale: mesh.scale.toArray(), color: `#${meshMaterials(mesh)[0]?.color?.getHexString() || 'ffffff'}`,
+        shapeWeights: mesh.userData.modelrShapeKeys?.map(key => key.value || 0) || []
+      };
+      mesh.position.fromArray(basePose.position).lerp(new THREE.Vector3().fromArray(actionPose.position), influence);
+      mesh.scale.fromArray(basePose.scale).lerp(new THREE.Vector3().fromArray(actionPose.scale), influence);
+      const from = new THREE.Quaternion().setFromEuler(new THREE.Euler(...basePose.rotation));
+      const to = new THREE.Quaternion().setFromEuler(new THREE.Euler(...actionPose.rotation));
+      mesh.quaternion.copy(from.slerp(to, influence));
+      const blendedColor = new THREE.Color(basePose.color).lerp(new THREE.Color(actionPose.color), influence);
+      meshMaterials(mesh).forEach(material => { if (material.color) material.color.copy(blendedColor); });
+      const baseWeights = basePose.shapeWeights || [];
+      const actionWeights = actionPose.shapeWeights || [];
+      applyShapeWeights(mesh, baseWeights.map((weight, index) => THREE.MathUtils.lerp(weight, actionWeights[index] ?? weight, influence)));
+    }
+    mesh.updateMatrixWorld(true);
+  });
+  applyDrivers();
+  if (selected) syncInputs();
+}
+function sampleAnimationTrack(keys, frame) {
+  if (!keys?.length) return null;
+  const sorted = keys.slice().sort((a, b) => a.frame - b.frame);
+  let before = sorted[0];
+  let after = sorted.at(-1);
+  for (let index = 0; index < sorted.length; index++) {
+    if (sorted[index].frame <= frame) before = sorted[index];
+    if (sorted[index].frame >= frame) { after = sorted[index]; break; }
+  }
+  const amount = before === after ? 0 : interpolateKeyframeAmount((frame - before.frame) / (after.frame - before.frame), before.interpolation);
+  const fromRotation = new THREE.Quaternion().setFromEuler(new THREE.Euler(...before.rotation));
+  const toRotation = new THREE.Quaternion().setFromEuler(new THREE.Euler(...after.rotation));
+  const rotation = fromRotation.slerp(toRotation, amount);
+  const euler = new THREE.Euler().setFromQuaternion(rotation);
+  const fromWeights = before.shapeWeights || [];
+  const toWeights = after.shapeWeights || [];
+  return {
+    position: new THREE.Vector3().fromArray(before.position).lerp(new THREE.Vector3().fromArray(after.position), amount).toArray(),
+    rotation: [euler.x, euler.y, euler.z],
+    scale: new THREE.Vector3().fromArray(before.scale).lerp(new THREE.Vector3().fromArray(after.scale), amount).toArray(),
+    color: `#${new THREE.Color(before.color).lerp(new THREE.Color(after.color), amount).getHexString()}`,
+    shapeWeights: fromWeights.map((weight, index) => THREE.MathUtils.lerp(weight, toWeights[index] ?? weight, amount))
+  };
+}
+function applyShapeWeights(mesh, weights = []) {
+  const shapeKeys = mesh.userData.modelrShapeKeys || [];
+  const position = mesh.geometry.attributes.position;
+  const basis = mesh.userData.modelrShapeBasis;
+  if (!position || !basis || basis.length !== position.count * 3 || !shapeKeys.length) return;
+  const normalized = shapeKeys.map((key, index) => THREE.MathUtils.clamp(weights[index] ?? key.value ?? 0, 0, 1));
+  for (let vertex = 0; vertex < position.count; vertex++) {
+    const offset = vertex * 3;
+    let x = basis[offset], y = basis[offset + 1], z = basis[offset + 2];
+    shapeKeys.forEach((key, index) => {
+      const target = key.positions;
+      const weight = normalized[index];
+      if (target?.length !== basis.length || !weight) return;
+      x += (target[offset] - basis[offset]) * weight;
+      y += (target[offset + 1] - basis[offset + 1]) * weight;
+      z += (target[offset + 2] - basis[offset + 2]) * weight;
+    });
+    position.setXYZ(vertex, x, y, z);
+  }
+  shapeKeys.forEach((key, index) => { key.value = normalized[index]; });
+  position.needsUpdate = true;
+  mesh.geometry.computeVertexNormals();
+  mesh.geometry.computeBoundingBox();
+  mesh.geometry.computeBoundingSphere();
+}
+function propertyValue(mesh, path) {
+  if (!isAnimationProperty(path)) return undefined;
+  const [property, axis] = path.split('.');
+  return mesh?.[property]?.[axis];
+}
+function setPropertyValue(mesh, path, value) {
+  if (!isAnimationProperty(path) || !Number.isFinite(value)) return;
+  const [property, axis] = path.split('.');
+  if (!mesh?.[property] || !['x', 'y', 'z'].includes(axis)) return;
+  mesh[property][axis] = value;
+}
+function applyDrivers() {
+  objects.forEach(mesh => {
+    for (const driver of mesh.userData.modelrDrivers || []) {
+      const source = objects.find(item => item.userData.modelrAnimationId === driver.sourceId);
+      if (!source) continue;
+      try {
+        const value = evaluateDriverExpression(driver.expression, propertyValue(source, driver.sourceProperty));
+        setPropertyValue(mesh, driver.targetProperty, value);
+      } catch (error) {
+        driver.error = error.message;
+      }
+    }
+  });
+}
+function renderGraphEditor() {
+  const graph = document.querySelector('#animationGraph');
+  const channel = document.querySelector('#graphChannel').value.split(':');
+  const keys = selected ? keyframesFor(selected).slice().sort((a, b) => a.frame - b.frame) : [];
+  const [property, axisText] = channel;
+  const axis = Number(axisText);
+  const values = keys.map(key => key[property]?.[axis]).filter(Number.isFinite);
+  const width = 800, height = 260, left = 52, right = 18, top = 18, bottom = 34;
+  const min = values.length ? Math.min(...values) : -1;
+  const max = values.length ? Math.max(...values) : 1;
+  const range = Math.max(max - min, .1);
+  const low = min - range * .15, high = max + range * .15;
+  const x = frame => left + THREE.MathUtils.clamp(frame / endFrame, 0, 1) * (width - left - right);
+  const y = value => top + (1 - (value - low) / (high - low)) * (height - top - bottom);
+  let markup = '';
+  for (let step = 0; step <= 4; step++) {
+    const lineY = top + step * (height - top - bottom) / 4;
+    const valueLabel = (high - step * (high - low) / 4).toFixed(2);
+    markup += `<line class="graph-grid" x1="${left}" y1="${lineY}" x2="${width - right}" y2="${lineY}"/><text class="graph-axis-label" x="4" y="${lineY + 3}">${valueLabel}</text>`;
+  }
+  for (let step = 0; step <= 6; step++) {
+    const frame = Math.round(endFrame * step / 6);
+    const lineX = x(frame);
+    markup += `<line class="graph-grid" x1="${lineX}" y1="${top}" x2="${lineX}" y2="${height - bottom}"/><text class="graph-axis-label" x="${lineX}" y="${height - 8}" text-anchor="middle">${frame}</text>`;
+  }
+  if (!keys.length) markup += '<text class="graph-empty" x="400" y="130" text-anchor="middle">Add keyframes to view this channel curve.</text>';
+  else {
+    const points = [];
+    for (let index = 0; index < keys.length; index++) {
+      const from = keys[index];
+      points.push(`${x(from.frame)},${y(from[property][axis])}`);
+      const to = keys[index + 1];
+      if (!to) continue;
+      for (let sample = 1; sample < 12; sample++) {
+        const amount = interpolateKeyframeAmount(sample / 12, from.interpolation);
+        points.push(`${x(THREE.MathUtils.lerp(from.frame, to.frame, sample / 12))},${y(THREE.MathUtils.lerp(from[property][axis], to[property][axis], amount))}`);
+      }
+    }
+    markup += `<polyline class="graph-curve" points="${points.join(' ')}"/>`;
+    keys.forEach(key => { markup += `<circle class="graph-key" data-frame="${key.frame}" cx="${x(key.frame)}" cy="${y(key[property][axis])}" r="6"><title>Frame ${key.frame}: ${key[property][axis].toFixed(3)}</title></circle>`; });
+  }
+  graph.innerHTML = markup;
+}
+function updateAnimationWorkspace() {
+  document.querySelector('#animationWorkspaceObject').textContent = selected?.name || 'No object selected';
+  renderGraphEditor();
+  renderNlaEditor();
+  renderDriverEditor();
+  renderShapeKeyEditor();
+}
+function openAnimationWorkspace(tab = 'graph') {
+  document.querySelector('#animationWorkspace').classList.add('open');
+  document.querySelector('#animationWorkspace').setAttribute('aria-hidden', 'false');
+  document.querySelectorAll('[data-animation-tab]').forEach(button => {
+    const active = button.dataset.animationTab === tab;
+    button.classList.toggle('active', active);
+  });
+  document.querySelectorAll('.animation-workspace-panel').forEach(panel => panel.classList.toggle('active', panel.id === `animation${tab[0].toUpperCase()}${tab.slice(1)}Panel`));
+  updateAnimationWorkspace();
+}
+function createAction() {
+  if (!selected) return;
+  const keys = keyframesFor(selected);
+  if (!keys.length) { window.alert('Add at least one keyframe before creating an action.'); return; }
+  rememberScene();
+  const actions = selected.userData.modelrActions ||= [];
+  const action = {
+    id: `action-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    name: document.querySelector('#actionNameInput').value.trim() || `Action ${actions.length + 1}`,
+    keyframes: structuredClone(keys)
+  };
+  actions.push(action);
+  const strips = selected.userData.modelrNlaStrips ||= [];
+  strips.push({ id: `strip-${Date.now()}`, actionId: action.id, start: Math.round(currentFrame), repeat: 1, scale: 1, influence: 1, muted: false });
+  document.querySelector('#actionNameInput').value = '';
+  updateAnimationWorkspace();
+}
+function renderNlaEditor() {
+  const list = document.querySelector('#nlaActionList');
+  if (!list) return;
+  const actions = selected?.userData.modelrActions || [];
+  const strips = selected?.userData.modelrNlaStrips || [];
+  list.innerHTML = actions.length ? actions.map(action => {
+    const strip = strips.find(item => item.actionId === action.id);
+    const duration = Math.max(1, action.keyframes.at(-1).frame - action.keyframes[0].frame);
+    const repeated = strip ? `<div class="nla-visual-track"><button class="nla-strip" data-strip-drag="${strip.id}" style="left:${THREE.MathUtils.clamp(strip.start / endFrame, 0, 1) * 100}%;width:${THREE.MathUtils.clamp(duration * strip.repeat * strip.scale / endFrame, .04, 1) * 100}%" title="${escapeListText(action.name)} · ${duration} frames × ${strip.repeat}">▰ ${escapeListText(action.name)}</button></div><label>Start <input type="number" min="0" max="1200" value="${strip.start}" data-strip="${strip.id}" data-field="start"></label><label>Repeat <input type="number" min="1" max="100" value="${strip.repeat}" data-strip="${strip.id}" data-field="repeat"></label><label>Speed <input type="number" min="0.1" max="10" step="0.1" value="${strip.scale}" data-strip="${strip.id}" data-field="scale"></label><label>Mix <input type="range" min="0" max="1" step="0.01" value="${strip.influence}" data-strip="${strip.id}" data-field="influence"></label><label>Mute <input type="checkbox" ${strip.muted ? 'checked' : ''} data-strip="${strip.id}" data-field="muted"></label><button data-action-remove-strip="${strip.id}">Remove strip</button>` : `<button data-action-add-strip="${action.id}">Add NLA strip</button>`;
+    return `<div class="animation-row"><b>${escapeListText(action.name)}</b><small>${action.keyframes.length} keys · ${duration} frames</small>${repeated}<button data-action-delete="${action.id}">Delete action</button></div>`;
+  }).join('') : '<div class="animation-row"><small>No actions yet. Add keyframes and create an action.</small></div>';
+  list.querySelectorAll('[data-action-add-strip]').forEach(button => button.onclick = () => {
+    rememberScene();
+    (selected.userData.modelrNlaStrips ||= []).push({ id: `strip-${Date.now()}`, actionId: button.dataset.actionAddStrip, start: Math.round(currentFrame), repeat: 1, scale: 1, influence: 1, muted: false });
+    updateAnimationWorkspace();
+  });
+  list.querySelectorAll('[data-action-delete]').forEach(button => button.onclick = () => {
+    rememberScene();
+    const actionId = button.dataset.actionDelete;
+    selected.userData.modelrActions = actions.filter(action => action.id !== actionId);
+    selected.userData.modelrNlaStrips = strips.filter(strip => strip.actionId !== actionId);
+    updateAnimationWorkspace();
+  });
+  list.querySelectorAll('[data-action-remove-strip]').forEach(button => button.onclick = () => {
+    rememberScene();
+    selected.userData.modelrNlaStrips = strips.filter(strip => strip.id !== button.dataset.actionRemoveStrip);
+    updateAnimationWorkspace();
+  });
+  list.querySelectorAll('[data-strip]').forEach(input => {
+    const update = () => {
+      const strip = strips.find(item => item.id === input.dataset.strip);
+      if (!strip) return;
+      rememberScene();
+      strip[input.dataset.field] = input.type === 'checkbox' ? input.checked : Number(input.value);
+      if (input.dataset.field !== 'influence') { applyAnimationFrame(currentFrame); updateAnimationWorkspace(); }
+      else applyAnimationFrame(currentFrame);
+    };
+    input.addEventListener(input.type === 'range' ? 'input' : 'change', update);
+  });
+  list.querySelectorAll('[data-strip-drag]').forEach(stripElement => stripElement.addEventListener('pointerdown', event => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    const strip = strips.find(item => item.id === stripElement.dataset.stripDrag);
+    if (!strip) return;
+    const startX = event.clientX;
+    const originalStart = strip.start;
+    const track = stripElement.parentElement.getBoundingClientRect();
+    let changed = false;
+    const move = pointerEvent => {
+      if (!(pointerEvent.buttons & 1)) return finish();
+      const nextStart = THREE.MathUtils.clamp(Math.round(originalStart + (pointerEvent.clientX - startX) / track.width * endFrame), 0, endFrame);
+      if (nextStart === strip.start) return;
+      if (!changed) rememberScene();
+      changed = true;
+      strip.start = nextStart;
+      applyAnimationFrame(currentFrame);
+      updateAnimationWorkspace();
+    };
+    const finish = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', finish);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', finish);
+  }));
+}
+function renderDriverEditor() {
+  const sourceSelect = document.querySelector('#driverSourceObject');
+  const list = document.querySelector('#driverList');
+  if (!sourceSelect || !list) return;
+  sourceSelect.innerHTML = objects.map(mesh => `<option value="${mesh.userData.modelrAnimationId}" ${mesh === selected ? 'selected' : ''}>${escapeListText(mesh.name)}</option>`).join('');
+  const drivers = selected?.userData.modelrDrivers || [];
+  list.innerHTML = drivers.length ? drivers.map(driver => {
+    const source = objects.find(mesh => mesh.userData.modelrAnimationId === driver.sourceId);
+    return `<div class="animation-row"><b>${escapeListText(driver.targetProperty)}</b><small>${escapeListText(source?.name || 'Missing object')}.${escapeListText(driver.sourceProperty)} → ${escapeListText(driver.expression)}${driver.error ? ` · ${escapeListText(driver.error)}` : ''}</small><button data-driver-delete="${driver.id}">Delete</button></div>`;
+  }).join('') : '<div class="animation-row"><small>No drivers on this object.</small></div>';
+  list.querySelectorAll('[data-driver-delete]').forEach(button => button.onclick = () => {
+    rememberScene();
+    selected.userData.modelrDrivers = drivers.filter(driver => driver.id !== button.dataset.driverDelete);
+    updateAnimationWorkspace();
+    applyDrivers();
+  });
+}
+function addDriver() {
+  if (!selected || !objects.length) return;
+  const expression = document.querySelector('#driverExpressionInput').value.trim();
+  try { evaluateDriverExpression(expression, 1); }
+  catch (error) { window.alert(`Invalid driver expression: ${error.message}`); return; }
+  rememberScene();
+  (selected.userData.modelrDrivers ||= []).push({
+    id: `driver-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    sourceId: document.querySelector('#driverSourceObject').value,
+    sourceProperty: document.querySelector('#driverSourceProperty').value,
+    targetProperty: document.querySelector('#driverTargetProperty').value,
+    expression
+  });
+  updateAnimationWorkspace();
+  applyDrivers();
+}
+function addShapeKey() {
+  if (!selected) return;
+  const position = selected.geometry.attributes.position;
+  const current = Array.from(position.array);
+  if (!selected.userData.modelrShapeBasis) {
+    rememberScene();
+    selected.userData.modelrShapeBasis = current;
+    selected.userData.modelrShapeKeys = [{ id: `shape-${Date.now()}`, name: 'Basis', positions: [...current], value: 0, basis: true }];
+  } else {
+    rememberScene();
+    const keys = selected.userData.modelrShapeKeys ||= [];
+    keys.push({ id: `shape-${Date.now()}`, name: `Key ${keys.filter(key => !key.basis).length + 1}`, positions: [...selected.userData.modelrShapeBasis], value: 0, basis: false });
+  }
+  updateAnimationWorkspace();
+}
+function captureShapeKey(keyId) {
+  if (!selected) return;
+  const key = (selected.userData.modelrShapeKeys || []).find(item => item.id === keyId && !item.basis);
+  if (!key) return;
+  rememberScene();
+  key.positions = Array.from(selected.geometry.attributes.position.array);
+  applyShapeWeights(selected, (selected.userData.modelrShapeKeys || []).map(() => 0));
+  updateVertexOverlay();
+  updateAnimationWorkspace();
+}
+function renderShapeKeyEditor() {
+  const list = document.querySelector('#shapeKeyList');
+  if (!list) return;
+  const keys = selected?.userData.modelrShapeKeys || [];
+  list.innerHTML = keys.length ? keys.map(key => key.basis
+    ? `<div class="animation-row"><b>Basis</b><small>Reference shape</small></div>`
+    : `<div class="animation-row"><b>${escapeListText(key.name)}</b><input type="range" min="0" max="1" step="0.01" value="${key.value || 0}" data-shape-value="${key.id}"><span class="row-value">${Number(key.value || 0).toFixed(2)}</span><button data-shape-capture="${key.id}">Capture edited shape</button><button data-shape-delete="${key.id}">Delete</button></div>`).join('') : '<div class="animation-row"><small>No shape keys. Add a Basis and a key, edit vertices, then capture the edited shape.</small></div>';
+  list.querySelectorAll('[data-shape-value]').forEach(input => input.addEventListener('input', () => {
+    const index = keys.findIndex(key => key.id === input.dataset.shapeValue);
+    const weights = keys.map(key => key.value || 0);
+    weights[index] = Number(input.value);
+    applyShapeWeights(selected, weights);
+    input.nextElementSibling.textContent = Number(input.value).toFixed(2);
+    if (selectedVertexIndex !== null) updateVertexOverlay();
+  }));
+  list.querySelectorAll('[data-shape-capture]').forEach(button => button.onclick = () => captureShapeKey(button.dataset.shapeCapture));
+  list.querySelectorAll('[data-shape-delete]').forEach(button => button.onclick = () => {
+    rememberScene();
+    const index = keys.findIndex(key => key.id === button.dataset.shapeDelete);
+    if (index >= 0) keys.splice(index, 1);
+    applyShapeWeights(selected, keys.map(key => key.value || 0));
+    updateAnimationWorkspace();
+  });
+}
+function updateTimeline() {
+  const frameInput = document.querySelector('#currentFrameInput');
+  const endInput = document.querySelector('#endFrameInput');
+  if (!frameInput || !endInput) return;
+  frameInput.max = String(endFrame);
+  frameInput.value = String(Math.round(currentFrame));
+  endInput.value = String(endFrame);
+  document.querySelectorAll('#timelineRuler > span').forEach((label, index) => { label.textContent = String(Math.round(endFrame * index / 6)); });
+  const percent = endFrame ? THREE.MathUtils.clamp(currentFrame / endFrame, 0, 1) * 100 : 0;
+  document.querySelector('#timelinePlayhead').style.left = `${percent}%`;
+  const keys = selected ? keyframesFor(selected) : [];
+  const markers = document.querySelector('#timelineKeyframes');
+  const tracks = ['location', 'rotation', 'scale', 'color'];
+  markers.innerHTML = tracks.map(track => `<div class="timeline-track" data-track="${track}">${keys.map(keyframe => {
+    const keyPercent = THREE.MathUtils.clamp(keyframe.frame / endFrame, 0, 1) * 100;
+    return `<button class="timeline-key" data-frame="${keyframe.frame}" data-easing="${keyframe.interpolation || 'linear'}" title="${track} · Frame ${keyframe.frame}" style="left:${keyPercent}%"></button>`;
+  }).join('')}</div>`).join('');
+  markers.querySelectorAll('.timeline-key').forEach(marker => {
+    marker.addEventListener('pointerdown', event => beginKeyframeDrag(event, marker));
+    marker.addEventListener('click', event => {
+      event.stopPropagation();
+      setCurrentFrame(Number(marker.dataset.frame));
+    });
+  });
+  document.querySelector('#timelineEndLabel').textContent = String(endFrame);
+  const hasKey = keys.some(keyframe => keyframe.frame === Math.round(currentFrame));
+  document.querySelector('#addKeyframeButton').disabled = !selected;
+  document.querySelector('#deleteKeyframeButton').disabled = !hasKey;
+  document.querySelector('#addKeyframeButton').classList.toggle('has-key', hasKey);
+  document.querySelector('#loopPlaybackInput').checked = loopPlayback;
+  const currentKey = keys.find(keyframe => keyframe.frame === Math.round(currentFrame));
+  document.querySelector('#interpolationSelect').disabled = !currentKey;
+  document.querySelector('#interpolationSelect').value = currentKey?.interpolation || 'linear';
+}
+function setCurrentFrame(frame, apply = true) {
+  currentFrame = THREE.MathUtils.clamp(Number(frame) || 0, 0, endFrame);
+  if (apply) applyAnimationFrame(currentFrame);
+  updateTimeline();
+}
+function captureKeyframe(mesh, frame = Math.round(currentFrame)) {
+  const keyframe = {
+    frame,
+    position: mesh.position.toArray(),
+    rotation: [mesh.rotation.x, mesh.rotation.y, mesh.rotation.z],
+    scale: mesh.scale.toArray(),
+    color: `#${meshMaterials(mesh)[0]?.color?.getHexString() || 'ffffff'}`,
+    interpolation: document.querySelector('#interpolationSelect').value || 'linear',
+    shapeWeights: (mesh.userData.modelrShapeKeys || []).map(key => key.value || 0)
+  };
+  const keyframes = keyframesFor(mesh);
+  const existing = keyframes.findIndex(item => item.frame === frame);
+  if (existing >= 0) keyframes[existing] = keyframe;
+  else keyframes.push(keyframe);
+  keyframes.sort((a, b) => a.frame - b.frame);
+}
+function insertKeyframe() {
+  if (!selected) return;
+  stopPlayback();
+  setCurrentFrame(Math.round(currentFrame), false);
+  rememberScene();
+  captureKeyframe(selected);
+  updateTimeline();
+}
+function deleteKeyframe() {
+  if (!selected) return;
+  stopPlayback();
+  const frame = Math.round(currentFrame);
+  const keyframes = keyframesFor(selected);
+  const index = keyframes.findIndex(keyframe => keyframe.frame === frame);
+  if (index < 0) return;
+  setCurrentFrame(frame, false);
+  rememberScene();
+  keyframes.splice(index, 1);
+  applyAnimationFrame(currentFrame);
+  updateTimeline();
+}
+function beginKeyframeDrag(event, marker) {
+  if (event.button !== 0 || !selected) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const sourceFrame = Number(marker.dataset.frame);
+  const keyframe = keyframesFor(selected).find(item => item.frame === sourceFrame);
+  if (!keyframe) return;
+  stopPlayback();
+  const ruler = document.querySelector('#timelineRuler');
+  let moved = false;
+  const move = pointerEvent => {
+    if (!(pointerEvent.buttons & 1)) return finish();
+    const rect = ruler.getBoundingClientRect();
+    const proposed = Math.round(THREE.MathUtils.clamp((pointerEvent.clientX - rect.left) / rect.width, 0, 1) * endFrame);
+    const occupied = new Set(keyframesFor(selected).filter(item => item !== keyframe).map(item => item.frame));
+    let next = proposed;
+    if (occupied.has(next)) {
+      const forward = proposed + 1;
+      const backward = proposed - 1;
+      next = forward <= endFrame && !occupied.has(forward) ? forward : backward >= 0 && !occupied.has(backward) ? backward : keyframe.frame;
+    }
+    if (next === keyframe.frame) return;
+    if (!moved) rememberScene();
+    keyframe.frame = next;
+    keyframesFor(selected).sort((a, b) => a.frame - b.frame);
+    moved = true;
+    setCurrentFrame(next);
+  };
+  const finish = () => {
+    window.removeEventListener('pointermove', move);
+    window.removeEventListener('pointerup', finish);
+    if (moved) updateTimeline();
+  };
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', finish);
+}
+function stopPlayback() {
+  isPlaying = false;
+  if (playbackRequest) cancelAnimationFrame(playbackRequest);
+  playbackRequest = 0;
+  playbackRemainder = 0;
+  document.querySelector('#playAnimationButton').textContent = '▶';
+  document.querySelector('#playAnimationButton').title = 'Play animation';
+  document.querySelector('#playAnimationButton').setAttribute('aria-label', 'Play animation');
+}
+function playbackTick(timestamp) {
+  if (!isPlaying) return;
+  if (!lastPlaybackTime) lastPlaybackTime = timestamp;
+  playbackRemainder += timestamp - lastPlaybackTime;
+  lastPlaybackTime = timestamp;
+  const frameDuration = 1000 / FRAME_RATE;
+  const framesToAdvance = Math.floor(playbackRemainder / frameDuration);
+  if (framesToAdvance > 0) {
+    playbackRemainder -= framesToAdvance * frameDuration;
+    const nextFrame = currentFrame + framesToAdvance;
+    if (nextFrame >= endFrame && !loopPlayback) {
+      setCurrentFrame(endFrame);
+      stopPlayback();
+      return;
+    }
+    setCurrentFrame(loopPlayback && nextFrame > endFrame ? nextFrame % (endFrame + 1) : nextFrame);
+  }
+  playbackRequest = requestAnimationFrame(playbackTick);
+}
+function togglePlayback() {
+  if (isPlaying) { stopPlayback(); return; }
+  if (currentFrame >= endFrame) setCurrentFrame(0);
+  isPlaying = true;
+  lastPlaybackTime = 0;
+  document.querySelector('#playAnimationButton').textContent = '❚❚';
+  document.querySelector('#playAnimationButton').title = 'Pause animation';
+  document.querySelector('#playAnimationButton').setAttribute('aria-label', 'Pause animation');
+  playbackRequest = requestAnimationFrame(playbackTick);
+}
 function serializedTriangleCount(item) {
   const json = item.serialized;
   const geometry = json?.geometries?.find(entry => entry.uuid === json.object?.geometry)?.data;
@@ -138,7 +663,7 @@ function serializedTriangleCount(item) {
   const vertexCount = position?.count || (position?.array?.length / (position?.itemSize || 3));
   return Math.floor((indexCount || vertexCount || 0) / 3);
 }
-function sceneSnapshot() { return objects.map(mesh => { const material = meshMaterials(mesh)[0]; const snapshot = { name: mesh.name, type: mesh.name.startsWith('Sphere') ? 'Sphere' : mesh.name.startsWith('Cylinder') ? 'Cylinder' : mesh.name.startsWith('Torus') ? 'Torus' : mesh.name.startsWith('Cone') ? 'Cone' : mesh.name.startsWith('Crown') ? 'Crown' : 'Cube', color: material?.color?.getHexString() || '999999', position: mesh.position.toArray(), scale: mesh.scale.toArray(), rotation: mesh.rotation.toArray(), rounding: mesh.userData.rounding || 0 }; if (mesh.userData.modelrImported) { snapshot.type = 'Imported'; snapshot.serialized = importedMeshSnapshot(mesh); } return snapshot; }); }
+function sceneSnapshot() { return objects.map(mesh => { const material = meshMaterials(mesh)[0]; const snapshot = { name: mesh.name, type: mesh.name.startsWith('Sphere') ? 'Sphere' : mesh.name.startsWith('Cylinder') ? 'Cylinder' : mesh.name.startsWith('Torus') ? 'Torus' : mesh.name.startsWith('Cone') ? 'Cone' : mesh.name.startsWith('Crown') ? 'Crown' : 'Cube', color: material?.color?.getHexString() || '999999', position: mesh.position.toArray(), scale: mesh.scale.toArray(), rotation: mesh.rotation.toArray(), rounding: mesh.userData.rounding || 0, visible: mesh.visible, animationId: mesh.userData.modelrAnimationId, keyframes: (mesh.userData.modelrKeyframes || []).map(keyframe => ({ ...keyframe, position: [...keyframe.position], rotation: [...keyframe.rotation], scale: [...keyframe.scale], shapeWeights: [...(keyframe.shapeWeights || [])] })), actions: structuredClone(mesh.userData.modelrActions || []), nlaStrips: structuredClone(mesh.userData.modelrNlaStrips || []), drivers: structuredClone(mesh.userData.modelrDrivers || []), shapeBasis: mesh.userData.modelrShapeBasis ? [...mesh.userData.modelrShapeBasis] : null, shapeKeys: structuredClone(mesh.userData.modelrShapeKeys || []), timelineFrame: currentFrame, timelineEnd: endFrame, loopPlayback }; if (mesh.userData.modelrImported) { snapshot.type = 'Imported'; snapshot.serialized = importedMeshSnapshot(mesh); } else if (mesh.userData.modelrVertexEdited) { snapshot.geometry = mesh.geometry.toJSON(); } return snapshot; }); }
 function rememberScene() { undoStack.push(sceneSnapshot()); if (undoStack.length > 50) undoStack.shift(); redoStack.length = 0; }
 function addUserObject(type, color, position) {
   if (objects.length >= MAX_SCENE_OBJECTS) { sceneLimitNotice(`This scene is limited to ${MAX_SCENE_OBJECTS} objects to keep the editor responsive.`); return; }
@@ -151,6 +676,11 @@ function addUserObject(type, color, position) {
   addObject(type, color, position);
 }
 function restoreScene(snapshot) {
+  stopPlayback();
+  currentFrame = 0;
+  endFrame = DEFAULT_END_FRAME;
+  loopPlayback = false;
+  clearVertexOverlay();
   discardSelectionOutline();
   objects.forEach(mesh => { scene.remove(mesh); mesh.geometry.dispose(); meshMaterials(mesh).forEach(material => { for (const value of Object.values(material)) if (value?.isTexture) value.dispose(); material.dispose(); }); });
   objects.length = 0;
@@ -160,11 +690,40 @@ function restoreScene(snapshot) {
     const type = item.type || 'Cube';
     if (item.serialized && restoredTriangles + serializedTriangleCount(item) > MAX_SCENE_TRIANGLES) { skippedObjects = true; return; }
     const mesh = item.serialized ? new THREE.ObjectLoader().parse(item.serialized) : makeMesh(type, parseInt(item.color || '999999', 16));
+    if (item.geometry && !item.serialized) { mesh.geometry.dispose(); mesh.geometry = new THREE.BufferGeometryLoader().parse(item.geometry); mesh.userData.modelrVertexEdited = true; }
     mesh.name = String(item.name || `${type} ${index + 1}`);
     if (item.position) mesh.position.fromArray(item.position);
     if (item.scale) mesh.scale.fromArray(item.scale);
     if (item.rotation) mesh.rotation.fromArray(item.rotation);
-    if (item.rounding && mesh.name.startsWith('Cube')) { mesh.userData.rounding = item.rounding; mesh.geometry.dispose(); mesh.geometry = new RoundedBoxGeometry(1.55, 1.55, 1.55, 4, item.rounding); }
+    mesh.visible = item.visible !== false;
+    mesh.userData.modelrAnimationId = item.animationId || `animation-${Date.now()}-${index}-${Math.random().toString(36).slice(2)}`;
+    const normalizeKeys = keys => Array.isArray(keys) ? keys.filter(isValidKeyframe).slice(0, 1000).map(keyframe => ({
+      frame: keyframe.frame, position: [...keyframe.position], rotation: [...keyframe.rotation], scale: [...keyframe.scale],
+      color: keyframe.color, shapeWeights: [...(keyframe.shapeWeights || [])],
+      interpolation: ['linear', 'ease', 'constant'].includes(keyframe.interpolation) ? keyframe.interpolation : 'linear'
+    })) : [];
+    mesh.userData.modelrKeyframes = normalizeKeys(item.keyframes);
+    mesh.userData.modelrActions = Array.isArray(item.actions) ? item.actions.filter(action => action && typeof action.id === 'string' && typeof action.name === 'string').slice(0, 100).map(action => ({ id: action.id.slice(0, 120), name: action.name.slice(0, 48), keyframes: normalizeKeys(action.keyframes) })).filter(action => action.keyframes.length) : [];
+    mesh.userData.modelrNlaStrips = Array.isArray(item.nlaStrips) ? item.nlaStrips.filter(strip => strip && typeof strip.id === 'string' && mesh.userData.modelrActions.some(action => action.id === strip.actionId)).slice(0, 100).map(strip => ({
+      id: strip.id.slice(0, 120), actionId: strip.actionId, start: THREE.MathUtils.clamp(Math.round(Number(strip.start) || 0), 0, 1200),
+      repeat: THREE.MathUtils.clamp(Math.round(Number(strip.repeat) || 1), 1, 100), scale: THREE.MathUtils.clamp(Number(strip.scale) || 1, .1, 10),
+      influence: THREE.MathUtils.clamp(Number(strip.influence ?? 1), 0, 1), muted: Boolean(strip.muted)
+    })) : [];
+    mesh.userData.modelrDrivers = Array.isArray(item.drivers) ? item.drivers.filter(driver => driver && typeof driver.id === 'string' && typeof driver.sourceId === 'string' && isAnimationProperty(driver.sourceProperty) && isAnimationProperty(driver.targetProperty) && typeof driver.expression === 'string').slice(0, 100).map(driver => ({
+      id: driver.id.slice(0, 120), sourceId: driver.sourceId.slice(0, 120), sourceProperty: driver.sourceProperty,
+      targetProperty: driver.targetProperty, expression: driver.expression.slice(0, 200)
+    })) : [];
+    const positionCount = mesh.geometry.attributes.position?.count || 0;
+    const validShapePositions = positions => Array.isArray(positions) && positions.length === positionCount * 3 && positions.every(Number.isFinite);
+    mesh.userData.modelrShapeBasis = validShapePositions(item.shapeBasis) ? item.shapeBasis : null;
+    mesh.userData.modelrShapeKeys = mesh.userData.modelrShapeBasis && Array.isArray(item.shapeKeys) ? item.shapeKeys.filter(key => key && typeof key.name === 'string' && validShapePositions(key.positions)).slice(0, 64).map(key => ({
+      id: String(key.id || `shape-${Math.random()}`).slice(0, 120), name: key.name.slice(0, 48), positions: key.positions,
+      value: THREE.MathUtils.clamp(Number(key.value) || 0, 0, 1), basis: Boolean(key.basis)
+    })) : [];
+    if (Number.isFinite(item.timelineFrame)) currentFrame = item.timelineFrame;
+    if (Number.isInteger(item.timelineEnd) && item.timelineEnd > 0) endFrame = THREE.MathUtils.clamp(item.timelineEnd, 1, 1200);
+    if (typeof item.loopPlayback === 'boolean') loopPlayback = item.loopPlayback;
+    if (!item.geometry && item.rounding && mesh.name.startsWith('Cube')) { mesh.userData.rounding = item.rounding; mesh.geometry.dispose(); mesh.geometry = new RoundedBoxGeometry(1.55, 1.55, 1.55, 4, item.rounding); }
     const meshTriangles = triangleCount(mesh);
     if (restoredTriangles + meshTriangles > MAX_SCENE_TRIANGLES) { mesh.geometry.dispose(); meshMaterials(mesh).forEach(material => material.dispose()); skippedObjects = true; return; }
     if (item.serialized) { mesh.userData.modelrImported = true; importedSerialization.set(mesh, item.serialized); }
@@ -175,20 +734,22 @@ function restoreScene(snapshot) {
   if (!objects.length) { const mesh = makeMesh('Cube', 0x999999); mesh.position.set(0, .8, 0); mesh.name = 'Cube 1'; scene.add(mesh); objects.push(mesh); }
   if (skippedObjects) sceneLimitNotice('Some objects were left out because the scene exceeds the editor performance limits.');
   selectObject(objects[0]);
+  applyAnimationFrame(currentFrame);
+  updateTimeline();
   updateList();
 }
-function duplicateSelected(exactPosition = false) { if (!selected) return; if (objects.length >= MAX_SCENE_OBJECTS || sceneTriangleCount() + triangleCount(selected) > MAX_SCENE_TRIANGLES) { sceneLimitNotice('This duplicate would exceed the scene performance limits.'); return; } rememberScene(); const duplicate = new THREE.Mesh(selected.geometry.clone(), Array.isArray(selected.material) ? selected.material.map(material => material.clone()) : selected.material.clone()); duplicate.name = `${selected.name} Copy ${objectIndex++}`; duplicate.position.copy(selected.position); if (!exactPosition) duplicate.position.add(new THREE.Vector3(.6, 0, .6)); duplicate.scale.copy(selected.scale); duplicate.rotation.copy(selected.rotation); duplicate.userData = { ...selected.userData }; duplicate.castShadow = selected.castShadow; duplicate.receiveShadow = selected.receiveShadow; scene.add(duplicate); objects.push(duplicate); selectObject(duplicate); updateList(); }
+function duplicateSelected(exactPosition = false) { if (!selected) return; if (objects.length >= MAX_SCENE_OBJECTS || sceneTriangleCount() + triangleCount(selected) > MAX_SCENE_TRIANGLES) { sceneLimitNotice('This duplicate would exceed the scene performance limits.'); return; } rememberScene(); const duplicate = new THREE.Mesh(selected.geometry.clone(), Array.isArray(selected.material) ? selected.material.map(material => material.clone()) : selected.material.clone()); duplicate.name = `${selected.name} Copy ${objectIndex++}`; duplicate.position.copy(selected.position); if (!exactPosition) duplicate.position.add(new THREE.Vector3(.6, 0, .6)); duplicate.scale.copy(selected.scale); duplicate.rotation.copy(selected.rotation); duplicate.userData = { ...selected.userData, modelrAnimationId: `animation-${Date.now()}-${objectIndex}`, modelrKeyframes: (selected.userData.modelrKeyframes || []).map(keyframe => ({ ...keyframe, position: [...keyframe.position], rotation: [...keyframe.rotation], scale: [...keyframe.scale] })) }; duplicate.castShadow = selected.castShadow; duplicate.receiveShadow = selected.receiveShadow; scene.add(duplicate); objects.push(duplicate); selectObject(duplicate); updateTimeline(); updateList(); }
 function undo() { if (!undoStack.length) return; redoStack.push(sceneSnapshot()); restoreScene(undoStack.pop()); }
 function redo() { if (!redoStack.length) return; undoStack.push(sceneSnapshot()); restoreScene(redoStack.pop()); }
 
 function updateScaleHandles() {
   const activeTool = document.querySelector('.tool.active')?.dataset.tool;
   moveHandles.forEach(handle => {
-    handle.visible = Boolean(selected) && (activeTool === 'move' || activeTool === 'select');
+    handle.visible = editorMode === 'object' && Boolean(selected) && (activeTool === 'move' || activeTool === 'select');
     if (selected) handle.position.copy(selected.position);
   });
   scaleHandles.forEach(handle => {
-    handle.visible = Boolean(selected) && activeTool === 'scale';
+    handle.visible = editorMode === 'object' && Boolean(selected) && activeTool === 'scale';
     if (!selected) return;
     const halfSize = selected.geometry.parameters?.width ? new THREE.Vector3(selected.geometry.parameters.width, selected.geometry.parameters.height, selected.geometry.parameters.depth).multiplyScalar(.5) : new THREE.Vector3(.85, .85, .85);
     const localPosition = new THREE.Vector3();
@@ -196,16 +757,114 @@ function updateScaleHandles() {
     handle.position.copy(selected.localToWorld(localPosition));
   });
   rotateHandles.forEach(handle => {
-    handle.visible = Boolean(selected) && activeTool === 'rotate';
+    handle.visible = editorMode === 'object' && Boolean(selected) && activeTool === 'rotate';
     if (!selected) return;
     handle.position.copy(selected.position);
     handle.scale.setScalar(Math.max(selected.scale.x, selected.scale.y, selected.scale.z));
   });
 }
 function discardSelectionOutline() { if (!selectionOutline) return; selectionOutline.parent?.remove(selectionOutline); selectionOutline.geometry.dispose(); selectionOutline.material.dispose(); selectionOutline = null; }
-function selectObject(mesh) { if (!mesh) return; discardSelectionOutline(); selected = mesh; selectionOutline = new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry), new THREE.LineBasicMaterial({ color: 0xf26639, transparent: true, opacity: .95, depthTest: false })); selectionOutline.renderOrder = 10; mesh.add(selectionOutline); document.querySelector('#selectionLabel').textContent = mesh.name; document.querySelector('#propertyName').textContent = mesh.name; document.querySelector('#propertyType').textContent = 'MESH'; const hex = `#${meshMaterials(mesh)[0]?.color?.getHexString() || 'ffffff'}`; document.querySelector('#colorPicker').value = hex; document.querySelector('#colorValue').textContent = hex.toUpperCase(); syncInputs(); updateList(); }
-function clearSelection() { discardSelectionOutline(); selected = null; document.querySelector('#selectionLabel').textContent = 'No selection'; updateScaleHandles(); updateList(); }
-function syncInputs() { if (!selected) return; ['x','y','z'].forEach(axis => { document.querySelector(`#pos${axis.toUpperCase()}`).value = selected.position[axis].toFixed(2); document.querySelector(`#scale${axis.toUpperCase()}`).value = selected.scale[axis].toFixed(2); }); const rounding = document.querySelector('#edgeRounding'); if (rounding) { rounding.value = selected.userData.rounding || 0; document.querySelector('#edgeRoundingValue').textContent = Number(rounding.value).toFixed(2); rounding.disabled = !selected.name.startsWith('Cube'); } const color = meshMaterials(selected)[0]?.color?.getHexString() || 'ffffff'; document.querySelector('#selectedDot').style.background = `#${color}`; updateScaleHandles(); }
+function clearVertexOverlay() {
+  if (vertexOverlay) { selected?.remove(vertexOverlay); vertexOverlay.material.dispose(); vertexOverlay = null; }
+  if (selectedVertexMarker) { selected?.remove(selectedVertexMarker); selectedVertexMarker.geometry.dispose(); selectedVertexMarker.material.dispose(); selectedVertexMarker = null; }
+  if (componentOverlay) { selected?.remove(componentOverlay); componentOverlay.geometry.dispose(); componentOverlay.material.dispose(); componentOverlay = null; }
+}
+function updateVertexOverlay() {
+  clearVertexOverlay();
+  if (editorMode !== 'edit' || !selected?.geometry.attributes.position) return;
+  vertexOverlay = new THREE.Points(selected.geometry, new THREE.PointsMaterial({ color: 0xf28c28, size: .09, sizeAttenuation: true, depthTest: true }));
+  vertexOverlay.userData.vertexOverlay = true;
+  selected.add(vertexOverlay);
+  if (!selectedComponentPoints.length) return;
+  const selectedPositions = [];
+  selectedComponentPoints.forEach(point => selectedPositions.push(point.x, point.y, point.z));
+  const highlightGeometry = new THREE.BufferGeometry();
+  highlightGeometry.setAttribute('position', new THREE.Float32BufferAttribute(selectedPositions, 3));
+  const highlightMaterial = componentMode === 'face'
+    ? new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide, transparent: true, opacity: .45, depthWrite: false })
+    : componentMode === 'edge'
+      ? new THREE.LineBasicMaterial({ color: 0xffffff, depthTest: false })
+      : new THREE.PointsMaterial({ color: 0xffffff, size: .17, sizeAttenuation: true, depthTest: false });
+  componentOverlay = componentMode === 'face'
+    ? new THREE.Mesh(highlightGeometry, highlightMaterial)
+    : componentMode === 'edge'
+      ? new THREE.LineSegments(highlightGeometry, highlightMaterial)
+      : new THREE.Points(highlightGeometry, highlightMaterial);
+  componentOverlay.renderOrder = 11;
+  selected.add(componentOverlay);
+}
+function setComponentMode(mode) {
+  componentMode = ['vertex', 'edge', 'face'].includes(mode) ? mode : 'vertex';
+  selectedComponentPoints = [];
+  document.querySelectorAll('[data-component-mode]').forEach(button => {
+    const active = button.dataset.componentMode === componentMode;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', String(active));
+  });
+  updateVertexOverlay();
+  if (editorMode === 'edit') document.querySelector('#editorModeLabel').textContent = `${componentMode[0].toUpperCase()}${componentMode.slice(1)} Edit`;
+  if (editorMode === 'edit') document.querySelector('.viewport-hint').textContent = `Click a ${componentMode} to select · Drag to move · Tab: Object Mode`;
+}
+function nearestMeshEdge(mesh, hit) {
+  const geometry = mesh.geometry;
+  const position = geometry.attributes.position;
+  if (!position || !hit?.face) return null;
+  const faceIndices = [hit.face.a, hit.face.b, hit.face.c];
+  const localA = new THREE.Vector3();
+  const localB = new THREE.Vector3();
+  const worldA = new THREE.Vector3();
+  const worldB = new THREE.Vector3();
+  const closestRay = new THREE.Vector3();
+  const closestEdge = new THREE.Vector3();
+  let nearest = null;
+  let nearestDistanceSq = Infinity;
+  for (const [a, b] of [[faceIndices[0], faceIndices[1]], [faceIndices[1], faceIndices[2]], [faceIndices[2], faceIndices[0]]]) {
+    localA.fromBufferAttribute(position, a);
+    localB.fromBufferAttribute(position, b);
+    worldA.copy(localA); mesh.localToWorld(worldA);
+    worldB.copy(localB); mesh.localToWorld(worldB);
+    const distanceSq = raycaster.ray.distanceSqToSegment(worldA, worldB, closestRay, closestEdge);
+    if (distanceSq < nearestDistanceSq) {
+      nearestDistanceSq = distanceSq;
+      nearest = [localA.clone(), localB.clone()];
+    }
+  }
+  const threshold = Math.max(.045, camera.position.distanceTo(mesh.position) * .012);
+  return nearest && nearestDistanceSq <= threshold * threshold ? nearest : null;
+}
+function componentPointsFromHit(hit) {
+  if (!hit || !selected) return [];
+  const position = selected.geometry.attributes.position;
+  if (componentMode === 'vertex') {
+    const index = hit.index;
+    if (!Number.isInteger(index) || index < 0 || index >= position.count) return [];
+    selectedVertexIndex = index;
+    return [new THREE.Vector3().fromBufferAttribute(position, index)];
+  }
+  if (!hit.face) return [];
+  return [hit.face.a, hit.face.b, hit.face.c].map(index => new THREE.Vector3().fromBufferAttribute(position, index));
+}
+function setEditorMode(mode) {
+  editorMode = mode === 'edit' ? 'edit' : 'object';
+  selectedVertexIndex = null;
+  selectedComponentPoints = [];
+  document.querySelectorAll('[data-editor-mode]').forEach(button => {
+    const active = button.dataset.editorMode === editorMode;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', String(active));
+  });
+  document.querySelector('#editComponentTools').classList.toggle('open', editorMode === 'edit');
+  const label = editorMode === 'edit' ? `${componentMode[0].toUpperCase()}${componentMode.slice(1)} Edit` : 'Object Mode';
+  document.querySelector('#editorModeLabel').textContent = label;
+  document.querySelector('.viewport-hint').textContent = editorMode === 'edit'
+    ? `Click a ${componentMode} to select · Drag to move · Tab: Object Mode`
+    : 'Right-click: orbit · Scroll: zoom · Drag: transform · Tab: Edit Mode';
+  updateVertexOverlay();
+  updateScaleHandles();
+}
+function selectObject(mesh) { if (!mesh) return; clearVertexOverlay(); discardSelectionOutline(); selected = mesh; selectedVertexIndex = null; selectedComponentPoints = []; keyframesFor(mesh); selectionOutline = new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry), new THREE.LineBasicMaterial({ color: 0xf26639, transparent: true, opacity: .95, depthTest: false })); selectionOutline.renderOrder = 10; mesh.add(selectionOutline); document.querySelector('#selectionLabel').textContent = mesh.name; document.querySelector('#propertyName').textContent = mesh.name; document.querySelector('#propertyType').textContent = 'MESH'; const hex = `#${meshMaterials(mesh)[0]?.color?.getHexString() || 'ffffff'}`; document.querySelector('#colorPicker').value = hex; document.querySelector('#colorValue').textContent = hex.toUpperCase(); syncInputs(); updateVertexOverlay(); updateTimeline(); updateList(); if (document.querySelector('#animationWorkspace')?.classList.contains('open')) updateAnimationWorkspace(); }
+function clearSelection() { clearVertexOverlay(); discardSelectionOutline(); selected = null; selectedVertexIndex = null; document.querySelector('#selectionLabel').textContent = 'No selection'; updateScaleHandles(); updateTimeline(); updateList(); if (document.querySelector('#animationWorkspace')?.classList.contains('open')) updateAnimationWorkspace(); }
+function syncInputs() { if (!selected) return; ['x','y','z'].forEach(axis => { document.querySelector(`#pos${axis.toUpperCase()}`).value = selected.position[axis].toFixed(2); document.querySelector(`#scale${axis.toUpperCase()}`).value = selected.scale[axis].toFixed(2); }); const rounding = document.querySelector('#edgeRounding'); if (rounding) { rounding.value = selected.userData.rounding || 0; document.querySelector('#edgeRoundingValue').textContent = Number(rounding.value).toFixed(2); rounding.disabled = !selected.name.startsWith('Cube'); } const color = meshMaterials(selected)[0]?.color?.getHexString() || 'ffffff'; document.querySelector('#selectedDot').style.background = `#${color}`; document.querySelector('#colorPicker').value = `#${color}`; document.querySelector('#colorValue').textContent = `#${color.toUpperCase()}`; updateScaleHandles(); }
 function setEdgeRounding(value) { if (!selected || !selected.name.startsWith('Cube')) return; const rounding = Math.min(.7, Math.max(0, Number(value) || 0)); const oldGeometry = selected.geometry; selected.geometry = new RoundedBoxGeometry(1.55, 1.55, 1.55, 4, rounding); selected.geometry.computeVertexNormals(); selected.userData.rounding = rounding; oldGeometry.dispose(); discardSelectionOutline(); selectionOutline = new THREE.LineSegments(new THREE.EdgesGeometry(selected.geometry), new THREE.LineBasicMaterial({ color: 0xf26639, transparent: true, opacity: .95, depthTest: false })); selectionOutline.renderOrder = 10; selected.add(selectionOutline); document.querySelector('#edgeRoundingValue').textContent = rounding.toFixed(2); updateScaleHandles(); }
 function escapeListText(value) { return String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;'); }
 function updateList() {
@@ -213,7 +872,7 @@ function updateList() {
   const row = (mesh, className) => `<button class="${className} ${mesh === selected ? 'selected' : ''}" data-name="${escapeListText(mesh.name)}"><span>${icon(mesh)}</span><b>${escapeListText(mesh.name)}</b><small>MESH</small></button>`;
   const list = document.querySelector('#objectList');
   const partsList = document.querySelector('#partsList');
-  const rows = objects.map(mesh => row(mesh, 'object-row')).join('');
+  const rows = `<div class="outliner-collection"><span>▾</span><b>Scene Collection</b><small>${objects.length}</small></div>${objects.map(mesh => `<div class="outliner-entry">${row(mesh, 'object-row')}<button class="outliner-visibility" data-name="${escapeListText(mesh.name)}" title="${mesh.visible ? 'Hide object' : 'Show object'}" aria-label="${mesh.visible ? 'Hide' : 'Show'} ${escapeListText(mesh.name)}">${mesh.visible ? '◉' : '○'}</button></div>`).join('')}`;
   const groups = new Map();
   const standalone = [];
   objects.forEach(mesh => {
@@ -235,10 +894,20 @@ function updateList() {
     item.onclick = () => selectObject(objects.find(mesh => mesh.name === item.dataset.name));
     item.ondblclick = () => selectObject(objects.find(mesh => mesh.name === item.dataset.name));
   });
+  document.querySelectorAll('.outliner-visibility').forEach(button => {
+    button.onclick = event => {
+      event.stopPropagation();
+      const mesh = objects.find(item => item.name === button.dataset.name);
+      if (!mesh) return;
+      rememberScene();
+      mesh.visible = !mesh.visible;
+      updateList();
+    };
+  });
 }
 function resize() { const rect = viewport.getBoundingClientRect(); renderer.setSize(rect.width, rect.height, false); camera.aspect = rect.width / rect.height; camera.updateProjectionMatrix(); }
 new ResizeObserver(resize).observe(viewport); resize();
-const renderScene = () => { controls.update(); renderer.render(scene, camera); };
+const renderScene = () => { controls.update(); applyDrivers(); renderer.render(scene, camera); };
 new MutationObserver(() => { if (appShell.getAttribute('aria-hidden') === 'false') requestAnimationFrame(() => { resize(); renderScene(); }); }).observe(appShell, { attributes: true, attributeFilter: ['aria-hidden'] });
 
 document.querySelectorAll('.tool[data-tool]').forEach(button => button.addEventListener('click', () => { document.querySelectorAll('.tool[data-tool]').forEach(item => item.classList.remove('active')); button.classList.add('active'); updateScaleHandles(); }));
@@ -253,6 +922,7 @@ document.querySelector('#edgeRounding').addEventListener('input', event => { rem
 
 const raycaster = new THREE.Raycaster();
 raycaster.params.Line.threshold = .18;
+raycaster.params.Points.threshold = .12;
 const pointer = new THREE.Vector2();
 const grabPlane = new THREE.Plane();
 const grabPoint = new THREE.Vector3();
@@ -260,12 +930,60 @@ const grabOffset = new THREE.Vector3();
 let dragStart = null;
 function snappedRotation(value) { const snap = document.querySelector('#rotationSnap'); const input = document.querySelector('#rotationStep'); if (!snap || !input || !snap.checked) return value; const step = Math.max(1, Number(input.value) || 15) * Math.PI / 180; return Math.round(value / step) * step; }
 document.querySelector('#rotationStep')?.addEventListener('input', () => { const snap = document.querySelector('#rotationSnap'); if (snap) snap.checked = true; });
+document.querySelectorAll('[data-editor-mode]').forEach(button => button.addEventListener('click', () => setEditorMode(button.dataset.editorMode)));
+document.querySelectorAll('[data-component-mode]').forEach(button => button.addEventListener('click', () => setComponentMode(button.dataset.componentMode)));
 renderer.domElement.addEventListener('pointerdown', event => {
   if (event.button !== 0) return;
+  if (isPlaying) stopPlayback();
   const rect = renderer.domElement.getBoundingClientRect();
   pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
   pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
   raycaster.setFromCamera(pointer, camera);
+  if (editorMode === 'edit') {
+    if (!selected) return;
+    selectedComponentPoints = [];
+    let hit = null;
+    const surfaceHit = raycaster.intersectObject(selected, false)[0] || null;
+    if (componentMode === 'vertex' && vertexOverlay) hit = raycaster.intersectObject(vertexOverlay)[0] || null;
+    else if (componentMode === 'edge') {
+      const edge = nearestMeshEdge(selected, surfaceHit);
+      if (edge) hit = { componentPoints: edge };
+    } else if (componentMode === 'face') hit = surfaceHit;
+    const componentPoints = hit?.componentPoints || componentPointsFromHit(hit);
+    if (componentPoints.length) {
+      selectedComponentPoints = componentPoints;
+      updateVertexOverlay();
+      const componentIndex = componentMode === 'vertex' ? ` ${selectedVertexIndex + 1}` : '';
+      document.querySelector('#selectionLabel').textContent = `${selected.name} · ${componentMode} ${componentIndex}`.trim();
+      const localPosition = componentPoints[0].clone();
+      const worldPosition = selected.localToWorld(localPosition.clone());
+      const cameraNormal = new THREE.Vector3();
+      camera.getWorldDirection(cameraNormal);
+      grabPlane.setFromNormalAndCoplanarPoint(cameraNormal, worldPosition);
+      const position = selected.geometry.attributes.position;
+      const vertexIndices = [];
+      const originalPositions = [];
+      for (let index = 0; index < position.count; index++) {
+        const point = new THREE.Vector3().fromBufferAttribute(position, index);
+        if (componentPoints.some(componentPoint => point.distanceToSquared(componentPoint) < 1e-10)) {
+          vertexIndices.push(index);
+          originalPositions.push(point.toArray());
+        }
+      }
+      dragStart = { kind: 'component', x: event.clientX, y: event.clientY, localPosition, componentPoints: componentPoints.map(point => point.clone()), vertexIndices, originalPositions, changed: false };
+      controls.enabled = false;
+      return;
+    }
+    const objectHit = raycaster.intersectObjects(objects, false)[0];
+    if (objectHit && objectHit.object !== selected) selectObject(objectHit.object);
+    else {
+      selectedVertexIndex = null;
+      selectedComponentPoints = [];
+      if (selected) document.querySelector('#selectionLabel').textContent = selected.name;
+      updateVertexOverlay();
+    }
+    return;
+  }
   const activeTool = document.querySelector('.tool.active')?.dataset.tool;
   const handleHit = activeTool === 'scale' ? raycaster.intersectObjects(scaleHandles, true)[0] : null;
   if (handleHit && selected) {
@@ -322,6 +1040,44 @@ renderer.domElement.addEventListener('pointermove', event => {
     handle.scale.setScalar(objectScale);
   });
   if (!dragStart || !selected) return;
+  if (dragStart.kind === 'component') {
+    if (!dragStart.changed && Math.hypot(event.clientX - dragStart.x, event.clientY - dragStart.y) < 2) return;
+    if (!dragStart.changed) {
+      rememberScene();
+      selected.geometry = selected.geometry.clone();
+      importedSerialization.delete(selected);
+      selected.userData.modelrVertexEdited = true;
+      updateVertexOverlay();
+      dragStart.changed = true;
+    }
+    if (!raycaster.ray.intersectPlane(grabPlane, grabPoint)) return;
+    const target = selected.worldToLocal(grabPoint.clone());
+    const delta = target.sub(dragStart.localPosition);
+    const position = selected.geometry.attributes.position;
+    selectedComponentPoints = dragStart.componentPoints.map(point => point.clone().add(delta));
+    dragStart.vertexIndices.forEach((index, offset) => {
+      const original = dragStart.originalPositions[offset];
+      position.setXYZ(index, original[0] + delta.x, original[1] + delta.y, original[2] + delta.z);
+    });
+    position.needsUpdate = true;
+    selected.geometry.computeVertexNormals();
+    selected.geometry.computeBoundingBox();
+    selected.geometry.computeBoundingSphere();
+    if (selectedVertexMarker) {
+      const markerPosition = selectedVertexMarker.geometry.attributes.position;
+      markerPosition.setXYZ(0, position.getX(selectedVertexIndex), position.getY(selectedVertexIndex), position.getZ(selectedVertexIndex));
+      markerPosition.needsUpdate = true;
+      selectedVertexMarker.geometry.computeBoundingSphere();
+    }
+    if (componentOverlay) {
+      const overlayPosition = componentOverlay.geometry.attributes.position;
+      selectedComponentPoints.forEach((point, index) => overlayPosition.setXYZ(index, point.x, point.y, point.z));
+      overlayPosition.needsUpdate = true;
+      if (componentMode === 'face') componentOverlay.geometry.computeVertexNormals();
+      componentOverlay.geometry.computeBoundingSphere();
+    }
+    return;
+  }
   const dx = (event.clientX - dragStart.x) * .012;
   const dy = (event.clientY - dragStart.y) * .012;
   if (dragStart.kind === 'grab') {
@@ -362,7 +1118,18 @@ renderer.domElement.addEventListener('pointermove', event => {
   else selected.position.set(dragStart.position.x + dx, dragStart.position.y - dy, dragStart.position.z);
   syncInputs();
 });
-window.addEventListener('pointerup', () => { dragStart = null; controls.enabled = true; });
+window.addEventListener('pointerup', () => {
+  if (dragStart?.kind === 'component' && dragStart.changed && selected) {
+    discardSelectionOutline();
+    selectionOutline = new THREE.LineSegments(new THREE.EdgesGeometry(selected.geometry), new THREE.LineBasicMaterial({ color: 0xf26639, transparent: true, opacity: .95, depthTest: false }));
+    selectionOutline.renderOrder = 10;
+    selected.add(selectionOutline);
+    updateVertexOverlay();
+    updateList();
+  }
+  dragStart = null;
+  controls.enabled = true;
+});
 function moveCamera(direction, distance = .12) {
   const forward = new THREE.Vector3();
   camera.getWorldDirection(forward);
@@ -387,6 +1154,9 @@ function updateCameraMovement() {
 }
 window.addEventListener('keydown', event => {
   const key = String(event.key || '').toLowerCase();
+  if (key === 'tab' && !event.target.matches('input, textarea')) { event.preventDefault(); setEditorMode(editorMode === 'object' ? 'edit' : 'object'); return; }
+  if (key === ' ' && !event.target.matches('input, textarea, button')) { event.preventDefault(); togglePlayback(); return; }
+  if (key === 'i' && !event.target.matches('input, textarea, button') && selected) { event.preventDefault(); insertKeyframe(); return; }
   const cameraMovement = { w: 'forward', arrowup: 'forward', s: 'backward', arrowdown: 'backward', a: 'left', arrowleft: 'left', d: 'right', arrowright: 'right' }[key];
   if (cameraMovement && !event.target.matches('input, textarea')) { event.preventDefault(); cameraKeys.add(key); return; }
   if ((event.ctrlKey || event.metaKey) && key === 'd' && !event.target.matches('input, textarea')) { event.preventDefault(); duplicateSelected(); return; }
@@ -394,6 +1164,105 @@ window.addEventListener('keydown', event => {
   event.preventDefault();
   if (key === 'y' || (key === 'z' && event.shiftKey)) redo();
   else undo();
+});
+document.querySelector('#previousFrameButton').addEventListener('click', () => { stopPlayback(); setCurrentFrame(Math.round(currentFrame) - 1); });
+document.querySelector('#nextFrameButton').addEventListener('click', () => { stopPlayback(); setCurrentFrame(Math.round(currentFrame) + 1); });
+document.querySelector('#playAnimationButton').addEventListener('click', togglePlayback);
+document.querySelector('#addKeyframeButton').addEventListener('click', insertKeyframe);
+document.querySelector('#deleteKeyframeButton').addEventListener('click', deleteKeyframe);
+document.querySelector('#currentFrameInput').addEventListener('change', event => { stopPlayback(); setCurrentFrame(Math.round(Number(event.target.value))); });
+document.querySelector('#endFrameInput').addEventListener('change', event => {
+  const maximumKeyframe = objects.reduce((max, mesh) => keyframesFor(mesh).reduce((trackMax, keyframe) => Math.max(trackMax, keyframe.frame), max), 0);
+  rememberScene();
+  endFrame = THREE.MathUtils.clamp(Math.max(Math.round(Number(event.target.value) || DEFAULT_END_FRAME), maximumKeyframe, 1), 1, 1200);
+  setCurrentFrame(currentFrame);
+});
+document.querySelector('#loopPlaybackInput').addEventListener('change', event => {
+  rememberScene();
+  loopPlayback = event.target.checked;
+});
+document.querySelector('#interpolationSelect').addEventListener('change', event => {
+  if (!selected) return;
+  const keyframe = keyframesFor(selected).find(item => item.frame === Math.round(currentFrame));
+  if (!keyframe) return;
+  rememberScene();
+  keyframe.interpolation = ['linear', 'ease', 'constant'].includes(event.target.value) ? event.target.value : 'linear';
+  applyAnimationFrame(currentFrame);
+  updateTimeline();
+});
+document.querySelector('#animationWorkspaceButton').addEventListener('click', () => openAnimationWorkspace('graph'));
+document.querySelector('#closeAnimationWorkspace').addEventListener('click', () => {
+  document.querySelector('#animationWorkspace').classList.remove('open');
+  document.querySelector('#animationWorkspace').setAttribute('aria-hidden', 'true');
+});
+document.querySelectorAll('[data-animation-tab]').forEach(button => button.addEventListener('click', () => openAnimationWorkspace(button.dataset.animationTab)));
+document.querySelector('#graphChannel').addEventListener('change', renderGraphEditor);
+document.querySelector('#createActionButton').addEventListener('click', createAction);
+document.querySelector('#addDriverButton').addEventListener('click', addDriver);
+document.querySelector('#addShapeKeyButton').addEventListener('click', addShapeKey);
+document.querySelector('#animationGraph').addEventListener('pointerdown', event => {
+  const marker = event.target.closest('.graph-key');
+  if (!marker || !selected) return;
+  event.preventDefault();
+  const keyframe = keyframesFor(selected).find(key => key.frame === Number(marker.dataset.frame));
+  if (!keyframe) return;
+  const [property, axisText] = document.querySelector('#graphChannel').value.split(':');
+  const axis = Number(axisText);
+  const svg = event.currentTarget;
+  const rect = svg.getBoundingClientRect();
+  const currentValues = keyframesFor(selected).map(key => key[property][axis]);
+  const min = currentValues.length ? Math.min(...currentValues) : -1;
+  const max = currentValues.length ? Math.max(...currentValues) : 1;
+  const range = Math.max(max - min, .1);
+  const low = min - range * .15, high = max + range * .15;
+  const initial = keyframe[property][axis];
+  let changed = false;
+  const move = pointerEvent => {
+    if (!(pointerEvent.buttons & 1)) return finish();
+    const viewY = (pointerEvent.clientY - rect.top) * 260 / rect.height;
+    const amount = THREE.MathUtils.clamp((viewY - 18) / (260 - 18 - 34), 0, 1);
+    const value = high - amount * (high - low);
+    if (!changed) rememberScene();
+    changed = true;
+    keyframe[property][axis] = value;
+    applyAnimationFrame(currentFrame);
+    renderGraphEditor();
+  };
+  const finish = () => {
+    window.removeEventListener('pointermove', move);
+    window.removeEventListener('pointerup', finish);
+    if (changed) { updateTimeline(); updateAnimationWorkspace(); }
+  };
+  if (Number.isFinite(initial)) {
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', finish);
+  }
+});
+document.querySelector('#timelineKeyframes').addEventListener('contextmenu', event => {
+  const marker = event.target.closest('.timeline-key');
+  if (!marker || !selected) return;
+  event.preventDefault();
+  const frame = Number(marker.dataset.frame);
+  rememberScene();
+  selected.userData.modelrKeyframes = keyframesFor(selected).filter(keyframe => keyframe.frame !== frame);
+  setCurrentFrame(frame);
+});
+document.querySelector('#timelineRuler').addEventListener('pointerdown', event => {
+  if (event.target.closest('.timeline-key')) return;
+  event.preventDefault();
+  stopPlayback();
+  const ruler = event.currentTarget;
+  const seek = pointerEvent => {
+    const rect = ruler.getBoundingClientRect();
+    setCurrentFrame(Math.round(THREE.MathUtils.clamp((pointerEvent.clientX - rect.left) / rect.width, 0, 1) * endFrame));
+  };
+  seek(event);
+  const finishSeek = () => {
+    window.removeEventListener('pointermove', seek);
+    window.removeEventListener('pointerup', finishSeek);
+  };
+  window.addEventListener('pointermove', seek);
+  window.addEventListener('pointerup', finishSeek);
 });
 window.addEventListener('keyup', event => cameraKeys.delete(String(event.key || '').toLowerCase()));
 window.addEventListener('blur', () => cameraKeys.clear());
