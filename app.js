@@ -9,6 +9,7 @@ const objects = [];
 const undoStack = [];
 const redoStack = [];
 const importedSerialization = new WeakMap();
+const collapsedModelFolders = new Set();
 const MAX_SCENE_OBJECTS = 300;
 const MAX_SCENE_TRIANGLES = 250000;
 const MAX_IMPORT_FILE_BYTES = 50 * 1024 * 1024;
@@ -109,7 +110,7 @@ function sceneTriangleCount() { return objects.reduce((total, mesh) => total + t
 function sceneLimitNotice(message) { window.alert(message); }
 function addObject(type, color = 0x999999, position = [0, .8, 0]) { if (objects.length >= MAX_SCENE_OBJECTS) { sceneLimitNotice(`This scene is limited to ${MAX_SCENE_OBJECTS} objects to keep the editor responsive.`); return null; } const mesh = makeMesh(type, color); if (sceneTriangleCount() + triangleCount(mesh) > MAX_SCENE_TRIANGLES) { mesh.geometry.dispose(); mesh.material.dispose(); sceneLimitNotice(`This scene is limited to ${MAX_SCENE_TRIANGLES.toLocaleString()} triangles to keep the editor responsive.`); return null; } mesh.position.set(...position); mesh.name = `${type} ${objectIndex++}`; scene.add(mesh); objects.push(mesh); selectObject(mesh); updateList(); return mesh; }
 function meshMaterials(mesh) { return (Array.isArray(mesh.material) ? mesh.material : [mesh.material]).filter(Boolean); }
-function restoreImportedMesh(item) { const mesh = new THREE.ObjectLoader().parse(item.serialized); mesh.name = item.name || mesh.name; if (item.position) mesh.position.fromArray(item.position); if (item.rotation) mesh.rotation.fromArray(item.rotation); if (item.scale) mesh.scale.fromArray(item.scale); mesh.userData.modelrImported = true; importedSerialization.set(mesh, item.serialized); scene.add(mesh); objects.push(mesh); return mesh; }
+function restoreImportedMesh(item) { const mesh = new THREE.ObjectLoader().parse(item.serialized); mesh.name = item.name || mesh.name; if (item.position) mesh.position.fromArray(item.position); if (item.rotation) mesh.rotation.fromArray(item.rotation); if (item.scale) mesh.scale.fromArray(item.scale); mesh.userData.modelrImported = true; mesh.userData.modelrGroupId ||= 'legacy-imported'; mesh.userData.modelrGroupName ||= 'Imported model'; importedSerialization.set(mesh, item.serialized); scene.add(mesh); objects.push(mesh); return mesh; }
 addObject('Cube', 0x999999, [0, .8, 0]).name = 'Cube 1';
 let savedScene = null;
 try { savedScene = localStorage.getItem('modelrCloudUser') ? null : JSON.parse(localStorage.getItem('modelrSceneV2') || 'null'); } catch (error) { localStorage.removeItem('modelrSceneV2'); }
@@ -206,7 +207,35 @@ function selectObject(mesh) { if (!mesh) return; discardSelectionOutline(); sele
 function clearSelection() { discardSelectionOutline(); selected = null; document.querySelector('#selectionLabel').textContent = 'No selection'; updateScaleHandles(); updateList(); }
 function syncInputs() { if (!selected) return; ['x','y','z'].forEach(axis => { document.querySelector(`#pos${axis.toUpperCase()}`).value = selected.position[axis].toFixed(2); document.querySelector(`#scale${axis.toUpperCase()}`).value = selected.scale[axis].toFixed(2); }); const rounding = document.querySelector('#edgeRounding'); if (rounding) { rounding.value = selected.userData.rounding || 0; document.querySelector('#edgeRoundingValue').textContent = Number(rounding.value).toFixed(2); rounding.disabled = !selected.name.startsWith('Cube'); } const color = meshMaterials(selected)[0]?.color?.getHexString() || 'ffffff'; document.querySelector('#selectedDot').style.background = `#${color}`; updateScaleHandles(); }
 function setEdgeRounding(value) { if (!selected || !selected.name.startsWith('Cube')) return; const rounding = Math.min(.7, Math.max(0, Number(value) || 0)); const oldGeometry = selected.geometry; selected.geometry = new RoundedBoxGeometry(1.55, 1.55, 1.55, 4, rounding); selected.geometry.computeVertexNormals(); selected.userData.rounding = rounding; oldGeometry.dispose(); discardSelectionOutline(); selectionOutline = new THREE.LineSegments(new THREE.EdgesGeometry(selected.geometry), new THREE.LineBasicMaterial({ color: 0xf26639, transparent: true, opacity: .95, depthTest: false })); selectionOutline.renderOrder = 10; selected.add(selectionOutline); document.querySelector('#edgeRoundingValue').textContent = rounding.toFixed(2); updateScaleHandles(); }
-function updateList() { const icon = mesh => mesh.name.startsWith('Sphere') ? '●' : mesh.name.startsWith('Cylinder') ? '▱' : mesh.name.startsWith('Torus') ? '○' : mesh.name.startsWith('Cone') ? '△' : mesh.name.startsWith('Crown') ? '♕' : '◇'; const list = document.querySelector('#objectList'); const partsList = document.querySelector('#partsList'); const rows = objects.map(mesh => `<button class="object-row ${mesh === selected ? 'selected' : ''}" data-name="${mesh.name}"><span>${icon(mesh)}</span><b>${mesh.name}</b><small>MESH</small></button>`).join(''); const partRows = objects.map(mesh => `<button class="part-row ${mesh === selected ? 'selected' : ''}" data-name="${mesh.name}"><span>${icon(mesh)}</span><b>${mesh.name}</b><small>MESH</small></button>`).join(''); if (list) list.innerHTML = rows; if (partsList) partsList.innerHTML = partRows; document.querySelector('#objectCount')?.replaceChildren(document.createTextNode(`${objects.length} objects`)); document.querySelector('#partsCount')?.replaceChildren(document.createTextNode(objects.length)); document.querySelectorAll('.object-row,.part-row').forEach(row => { row.onclick = () => selectObject(objects.find(item => item.name === row.dataset.name)); row.ondblclick = () => selectObject(objects.find(item => item.name === row.dataset.name)); }); }
+function escapeListText(value) { return String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;'); }
+function updateList() {
+  const icon = mesh => mesh.name.startsWith('Sphere') ? '●' : mesh.name.startsWith('Cylinder') ? '▱' : mesh.name.startsWith('Torus') ? '○' : mesh.name.startsWith('Cone') ? '△' : mesh.name.startsWith('Crown') ? '♕' : '◇';
+  const row = (mesh, className) => `<button class="${className} ${mesh === selected ? 'selected' : ''}" data-name="${escapeListText(mesh.name)}"><span>${icon(mesh)}</span><b>${escapeListText(mesh.name)}</b><small>MESH</small></button>`;
+  const list = document.querySelector('#objectList');
+  const partsList = document.querySelector('#partsList');
+  const rows = objects.map(mesh => row(mesh, 'object-row')).join('');
+  const groups = new Map();
+  const standalone = [];
+  objects.forEach(mesh => {
+    if (!mesh.userData.modelrImported) { standalone.push(mesh); return; }
+    const id = mesh.userData.modelrGroupId || 'legacy-imported';
+    if (!groups.has(id)) groups.set(id, { name: mesh.userData.modelrGroupName || 'Imported model', meshes: [] });
+    groups.get(id).meshes.push(mesh);
+  });
+  const folderRows = Array.from(groups, ([id, group]) => `<details class="model-folder" data-group="${escapeListText(id)}" ${collapsedModelFolders.has(id) ? '' : 'open'}><summary><span class="model-folder-icon">▰</span><b>${escapeListText(group.name)}</b><small>${group.meshes.length}</small></summary><div class="model-folder-items">${group.meshes.map(mesh => row(mesh, 'part-row')).join('')}</div></details>`).join('');
+  if (list) list.innerHTML = rows;
+  if (partsList) partsList.innerHTML = `${standalone.map(mesh => row(mesh, 'part-row')).join('')}${folderRows}`;
+  partsList?.querySelectorAll('.model-folder').forEach(folder => folder.addEventListener('toggle', () => {
+    if (folder.open) collapsedModelFolders.delete(folder.dataset.group);
+    else collapsedModelFolders.add(folder.dataset.group);
+  }));
+  document.querySelector('#objectCount')?.replaceChildren(document.createTextNode(`${objects.length} objects`));
+  document.querySelector('#partsCount')?.replaceChildren(document.createTextNode(objects.length));
+  document.querySelectorAll('.object-row,.part-row').forEach(item => {
+    item.onclick = () => selectObject(objects.find(mesh => mesh.name === item.dataset.name));
+    item.ondblclick = () => selectObject(objects.find(mesh => mesh.name === item.dataset.name));
+  });
+}
 function resize() { const rect = viewport.getBoundingClientRect(); renderer.setSize(rect.width, rect.height, false); camera.aspect = rect.width / rect.height; camera.updateProjectionMatrix(); }
 new ResizeObserver(resize).observe(viewport); resize();
 const renderScene = () => { controls.update(); renderer.render(scene, camera); };
@@ -615,13 +644,15 @@ modelImportInput.addEventListener('change', async event => {
       if (sceneTriangleCount() + importedTriangles > MAX_SCENE_TRIANGLES) throw new Error(`A scene can contain at most ${MAX_SCENE_TRIANGLES.toLocaleString()} triangles.`);
     });
     const imported = [];
+    const modelGroupName = modelFileName.split('/').pop().replace(/\.(gltf|glb)$/i, '') || 'Imported model';
+    const modelGroupId = `model-${Date.now()}-${objectIndex}`;
     root.traverse(node => {
       if (!node.isMesh) return;
       const mesh = node.clone(false);
       node.matrixWorld.decompose(mesh.position, mesh.quaternion, mesh.scale);
       const baseName = node.name?.trim() || modelFileName.split('/').pop().replace(/\.(gltf|glb)$/i, '');
       mesh.name = `${baseName} ${objectIndex++}`;
-      mesh.userData = { ...mesh.userData, modelrImported: true };
+      mesh.userData = { ...mesh.userData, modelrImported: true, modelrGroupId: modelGroupId, modelrGroupName: modelGroupName };
       imported.push(mesh);
     });
     if (!imported.length) throw new Error('No mesh objects were found in this file.');
@@ -673,6 +704,26 @@ function enterStudio(email) {
   authScreen.style.display = 'none';
   appShell.setAttribute('aria-hidden', 'false');
 }
+async function migrateLocalProjectsForAccount(email, password) {
+  const cachedUser = localStorage.getItem('modelrCloudUser');
+  if (cachedUser && cachedUser !== email) return;
+  let legacyUsers = {};
+  try { legacyUsers = JSON.parse(localStorage.getItem('modelrUsers') || '{}'); } catch (error) { }
+  if (legacyUsers[email] !== password) return;
+  const localProjects = projects().filter(project => Array.isArray(project.scene));
+  if (!localProjects.length) return;
+  const cloudProjects = await apiRequest('/api/projects');
+  const cloudIds = new Set(cloudProjects.map(project => project.id));
+  for (const project of localProjects) {
+    const id = typeof project.id === 'string' ? project.id : `${Date.now()}-${project.name}`;
+    if (cloudIds.has(id)) continue;
+    await apiRequest('/api/projects', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: prepareJsonRequest({ ...project, id })
+    });
+  }
+}
 document.querySelectorAll('.auth-tab').forEach(tab => tab.addEventListener('click', () => {
   authMode = tab.dataset.auth;
   document.querySelectorAll('.auth-tab').forEach(item => item.classList.toggle('active', item === tab));
@@ -704,6 +755,7 @@ authForm.addEventListener('submit', async event => {
         const migrationProjects = !cachedUser || cachedUser === email ? projects() : [];
         result = await apiRequest('/api/auth/signup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: prepareJsonRequest({ email, password, projects: migrationProjects }) });
       }
+      await migrateLocalProjectsForAccount(email, password);
     }
     localStorage.removeItem('modelrUsers');
     await syncCloudProjects();
