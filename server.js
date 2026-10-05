@@ -171,7 +171,7 @@ async function handleApi(request, response, url) {
 
   if (request.method === 'GET' && url.pathname === '/api/projects') {
     const result = await pool.query(
-      'SELECT id, name, objects, updated_at AS "updatedAt", scene FROM modelr_projects WHERE user_id = $1 ORDER BY updated_at DESC',
+      'SELECT id, name, objects, updated_at AS "updatedAt" FROM modelr_projects WHERE user_id = $1 ORDER BY updated_at DESC',
       [user.id]
     );
     sendJson(response, 200, result.rows); return;
@@ -184,6 +184,14 @@ async function handleApi(request, response, url) {
   }
 
   const projectMatch = url.pathname.match(/^\/api\/projects\/([^/]+)$/);
+  if (request.method === 'GET' && projectMatch) {
+    const result = await pool.query(
+      'SELECT id, name, objects, updated_at AS "updatedAt", scene FROM modelr_projects WHERE user_id = $1 AND id = $2',
+      [user.id, decodeURIComponent(projectMatch[1])]
+    );
+    if (!result.rows[0]) { sendJson(response, 404, { error: 'Project not found.' }); return; }
+    sendJson(response, 200, result.rows[0]); return;
+  }
   if (request.method === 'DELETE' && projectMatch) {
     await pool.query('DELETE FROM modelr_projects WHERE user_id = $1 AND id = $2', [user.id, decodeURIComponent(projectMatch[1])]);
     sendJson(response, 200, { ok: true }); return;

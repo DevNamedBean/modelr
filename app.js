@@ -8,6 +8,13 @@ import JSZip from 'https://cdn.jsdelivr.net/npm/jszip@3.10.1/+esm';
 const objects = [];
 const undoStack = [];
 const redoStack = [];
+const importedSerialization = new WeakMap();
+const MAX_SCENE_OBJECTS = 300;
+const MAX_SCENE_TRIANGLES = 250000;
+const MAX_IMPORT_FILE_BYTES = 50 * 1024 * 1024;
+const MAX_IMPORT_ARCHIVE_BYTES = 64 * 1024 * 1024;
+const MAX_IMPORT_ARCHIVE_ENTRIES = 200;
+const MAX_REQUEST_BODY_CHARS = 20 * 1024 * 1024;
 let selected = null;
 let selectionOutline = null;
 let objectIndex = 1;
@@ -97,17 +104,18 @@ function makeMesh(type, color) {
   const material = new THREE.MeshStandardMaterial({ color, roughness: .32, metalness: .08 });
   const mesh = new THREE.Mesh(geometry, material); mesh.userData.rounding = type === 'Cube' ? .04 : 0; mesh.castShadow = true; mesh.receiveShadow = true; return mesh;
 }
-function addObject(type, color = 0x999999, position = [0, .8, 0]) { const mesh = makeMesh(type, color); mesh.position.set(...position); mesh.name = `${type} ${objectIndex++}`; scene.add(mesh); objects.push(mesh); selectObject(mesh); updateList(); return mesh; }
+function triangleCount(mesh) { const geometry = mesh.geometry; return Math.floor((geometry.index?.count || geometry.attributes.position?.count || 0) / 3); }
+function sceneTriangleCount() { return objects.reduce((total, mesh) => total + triangleCount(mesh), 0); }
+function sceneLimitNotice(message) { window.alert(message); }
+function addObject(type, color = 0x999999, position = [0, .8, 0]) { if (objects.length >= MAX_SCENE_OBJECTS) { sceneLimitNotice(`This scene is limited to ${MAX_SCENE_OBJECTS} objects to keep the editor responsive.`); return null; } const mesh = makeMesh(type, color); if (sceneTriangleCount() + triangleCount(mesh) > MAX_SCENE_TRIANGLES) { mesh.geometry.dispose(); mesh.material.dispose(); sceneLimitNotice(`This scene is limited to ${MAX_SCENE_TRIANGLES.toLocaleString()} triangles to keep the editor responsive.`); return null; } mesh.position.set(...position); mesh.name = `${type} ${objectIndex++}`; scene.add(mesh); objects.push(mesh); selectObject(mesh); updateList(); return mesh; }
 function meshMaterials(mesh) { return (Array.isArray(mesh.material) ? mesh.material : [mesh.material]).filter(Boolean); }
-function restoreImportedMesh(item) { const mesh = new THREE.ObjectLoader().parse(item.serialized); mesh.userData.modelrImported = true; scene.add(mesh); objects.push(mesh); return mesh; }
+function restoreImportedMesh(item) { const mesh = new THREE.ObjectLoader().parse(item.serialized); mesh.name = item.name || mesh.name; if (item.position) mesh.position.fromArray(item.position); if (item.rotation) mesh.rotation.fromArray(item.rotation); if (item.scale) mesh.scale.fromArray(item.scale); mesh.userData.modelrImported = true; importedSerialization.set(mesh, item.serialized); scene.add(mesh); objects.push(mesh); return mesh; }
 addObject('Cube', 0x999999, [0, .8, 0]).name = 'Cube 1';
 let savedScene = null;
-try { savedScene = JSON.parse(localStorage.getItem('modelrSceneV2') || 'null'); } catch (error) { localStorage.removeItem('modelrSceneV2'); }
+try { savedScene = localStorage.getItem('modelrCloudUser') ? null : JSON.parse(localStorage.getItem('modelrSceneV2') || 'null'); } catch (error) { localStorage.removeItem('modelrSceneV2'); }
 const validSavedScene = Array.isArray(savedScene) ? savedScene.filter(item => item && (item.serialized || ['Cube', 'Sphere', 'Cylinder', 'Torus', 'Cone', 'Crown'].includes(item.type || item.name?.split(' ')[0])) && (item.serialized || (Array.isArray(item.position) && item.position.length === 3 && item.position.every(Number.isFinite)))).map(item => ({ ...item, type: item.type || item.name?.split(' ')[0] || 'Imported' })) : [];
 if (validSavedScene.length) {
-  objects.splice(0).forEach(mesh => scene.remove(mesh));
-  validSavedScene.forEach(item => { if (item.serialized) { restoreImportedMesh(item); return; } const mesh = addObject(item.type, parseInt(item.color || '999999', 16), item.position); mesh.name = item.name; if (Array.isArray(item.scale)) mesh.scale.fromArray(item.scale); if (item.rounding && mesh.name.startsWith('Cube')) { mesh.userData.rounding = item.rounding; mesh.geometry.dispose(); mesh.geometry = new RoundedBoxGeometry(1.55, 1.55, 1.55, 4, item.rounding); } });
-  selectObject(objects[0]);
+  restoreScene(validSavedScene);
 }
 else {
   selectObject(objects[0]);
@@ -119,10 +127,56 @@ controls.target.set(0, .8, 0);
 controls.update();
 camera.lookAt(0, .8, 0);
 
-function sceneSnapshot() { return objects.map(mesh => { const material = meshMaterials(mesh)[0]; const snapshot = { name: mesh.name, type: mesh.name.startsWith('Sphere') ? 'Sphere' : mesh.name.startsWith('Cylinder') ? 'Cylinder' : mesh.name.startsWith('Torus') ? 'Torus' : mesh.name.startsWith('Cone') ? 'Cone' : mesh.name.startsWith('Crown') ? 'Crown' : 'Cube', color: material?.color?.getHexString() || '999999', position: mesh.position.toArray(), scale: mesh.scale.toArray(), rotation: mesh.rotation.toArray(), rounding: mesh.userData.rounding || 0 }; if (mesh.userData.modelrImported) { const storedMesh = mesh.clone(false); storedMesh.userData.modelrImported = true; snapshot.type = 'Imported'; snapshot.serialized = storedMesh.toJSON(); } return snapshot; }); }
+function importedMeshSnapshot(mesh) { let serialized = importedSerialization.get(mesh); if (!serialized) { const storedMesh = mesh.clone(false); storedMesh.userData.modelrImported = true; serialized = storedMesh.toJSON(); importedSerialization.set(mesh, serialized); } return serialized; }
+function serializedTriangleCount(item) {
+  const json = item.serialized;
+  const geometry = json?.geometries?.find(entry => entry.uuid === json.object?.geometry)?.data;
+  if (!geometry) return 0;
+  const indexCount = geometry.index?.array?.length;
+  const position = geometry.attributes?.position;
+  const vertexCount = position?.count || (position?.array?.length / (position?.itemSize || 3));
+  return Math.floor((indexCount || vertexCount || 0) / 3);
+}
+function sceneSnapshot() { return objects.map(mesh => { const material = meshMaterials(mesh)[0]; const snapshot = { name: mesh.name, type: mesh.name.startsWith('Sphere') ? 'Sphere' : mesh.name.startsWith('Cylinder') ? 'Cylinder' : mesh.name.startsWith('Torus') ? 'Torus' : mesh.name.startsWith('Cone') ? 'Cone' : mesh.name.startsWith('Crown') ? 'Crown' : 'Cube', color: material?.color?.getHexString() || '999999', position: mesh.position.toArray(), scale: mesh.scale.toArray(), rotation: mesh.rotation.toArray(), rounding: mesh.userData.rounding || 0 }; if (mesh.userData.modelrImported) { snapshot.type = 'Imported'; snapshot.serialized = importedMeshSnapshot(mesh); } return snapshot; }); }
 function rememberScene() { undoStack.push(sceneSnapshot()); if (undoStack.length > 50) undoStack.shift(); redoStack.length = 0; }
-function restoreScene(snapshot) { objects.forEach(mesh => scene.remove(mesh)); objects.length = 0; snapshot.filter(item => item.serialized || (Array.isArray(item.position) && item.position.length === 3 && item.position.every(Number.isFinite))).forEach((item, index) => { if (item.serialized) { restoreImportedMesh(item); return; } const type = item.type || 'Cube'; const mesh = addObject(type, parseInt(item.color || '999999', 16), item.position); mesh.name = String(item.name || `${type} ${index + 1}`); if (Array.isArray(item.scale)) mesh.scale.fromArray(item.scale); if (item.rotation) mesh.rotation.fromArray(item.rotation); }); if (!objects.length) addObject('Cube', 0x999999, [0, .8, 0]); selectObject(objects[0]); updateList(); }
-function duplicateSelected(exactPosition = false) { if (!selected) return; rememberScene(); const duplicate = new THREE.Mesh(selected.geometry.clone(), selected.material.clone()); duplicate.name = `${selected.name} Copy ${objectIndex++}`; duplicate.position.copy(selected.position); if (!exactPosition) duplicate.position.add(new THREE.Vector3(.6, 0, .6)); duplicate.scale.copy(selected.scale); duplicate.rotation.copy(selected.rotation); duplicate.userData = { ...selected.userData }; duplicate.castShadow = selected.castShadow; duplicate.receiveShadow = selected.receiveShadow; scene.add(duplicate); objects.push(duplicate); selectObject(duplicate); updateList(); }
+function addUserObject(type, color, position) {
+  if (objects.length >= MAX_SCENE_OBJECTS) { sceneLimitNotice(`This scene is limited to ${MAX_SCENE_OBJECTS} objects to keep the editor responsive.`); return; }
+  const candidate = makeMesh(type, color);
+  const exceedsTriangleLimit = sceneTriangleCount() + triangleCount(candidate) > MAX_SCENE_TRIANGLES;
+  candidate.geometry.dispose();
+  candidate.material.dispose();
+  if (exceedsTriangleLimit) { sceneLimitNotice(`This scene is limited to ${MAX_SCENE_TRIANGLES.toLocaleString()} triangles to keep the editor responsive.`); return; }
+  rememberScene();
+  addObject(type, color, position);
+}
+function restoreScene(snapshot) {
+  discardSelectionOutline();
+  objects.forEach(mesh => { scene.remove(mesh); mesh.geometry.dispose(); meshMaterials(mesh).forEach(material => { for (const value of Object.values(material)) if (value?.isTexture) value.dispose(); material.dispose(); }); });
+  objects.length = 0;
+  let restoredTriangles = 0;
+  let skippedObjects = snapshot.length > MAX_SCENE_OBJECTS;
+  snapshot.filter(item => item.serialized || (Array.isArray(item.position) && item.position.length === 3 && item.position.every(Number.isFinite))).slice(0, MAX_SCENE_OBJECTS).forEach((item, index) => {
+    const type = item.type || 'Cube';
+    if (item.serialized && restoredTriangles + serializedTriangleCount(item) > MAX_SCENE_TRIANGLES) { skippedObjects = true; return; }
+    const mesh = item.serialized ? new THREE.ObjectLoader().parse(item.serialized) : makeMesh(type, parseInt(item.color || '999999', 16));
+    mesh.name = String(item.name || `${type} ${index + 1}`);
+    if (item.position) mesh.position.fromArray(item.position);
+    if (item.scale) mesh.scale.fromArray(item.scale);
+    if (item.rotation) mesh.rotation.fromArray(item.rotation);
+    if (item.rounding && mesh.name.startsWith('Cube')) { mesh.userData.rounding = item.rounding; mesh.geometry.dispose(); mesh.geometry = new RoundedBoxGeometry(1.55, 1.55, 1.55, 4, item.rounding); }
+    const meshTriangles = triangleCount(mesh);
+    if (restoredTriangles + meshTriangles > MAX_SCENE_TRIANGLES) { mesh.geometry.dispose(); meshMaterials(mesh).forEach(material => material.dispose()); skippedObjects = true; return; }
+    if (item.serialized) { mesh.userData.modelrImported = true; importedSerialization.set(mesh, item.serialized); }
+    restoredTriangles += meshTriangles;
+    scene.add(mesh);
+    objects.push(mesh);
+  });
+  if (!objects.length) { const mesh = makeMesh('Cube', 0x999999); mesh.position.set(0, .8, 0); mesh.name = 'Cube 1'; scene.add(mesh); objects.push(mesh); }
+  if (skippedObjects) sceneLimitNotice('Some objects were left out because the scene exceeds the editor performance limits.');
+  selectObject(objects[0]);
+  updateList();
+}
+function duplicateSelected(exactPosition = false) { if (!selected) return; if (objects.length >= MAX_SCENE_OBJECTS || sceneTriangleCount() + triangleCount(selected) > MAX_SCENE_TRIANGLES) { sceneLimitNotice('This duplicate would exceed the scene performance limits.'); return; } rememberScene(); const duplicate = new THREE.Mesh(selected.geometry.clone(), Array.isArray(selected.material) ? selected.material.map(material => material.clone()) : selected.material.clone()); duplicate.name = `${selected.name} Copy ${objectIndex++}`; duplicate.position.copy(selected.position); if (!exactPosition) duplicate.position.add(new THREE.Vector3(.6, 0, .6)); duplicate.scale.copy(selected.scale); duplicate.rotation.copy(selected.rotation); duplicate.userData = { ...selected.userData }; duplicate.castShadow = selected.castShadow; duplicate.receiveShadow = selected.receiveShadow; scene.add(duplicate); objects.push(duplicate); selectObject(duplicate); updateList(); }
 function undo() { if (!undoStack.length) return; redoStack.push(sceneSnapshot()); restoreScene(undoStack.pop()); }
 function redo() { if (!redoStack.length) return; undoStack.push(sceneSnapshot()); restoreScene(redoStack.pop()); }
 
@@ -147,10 +201,11 @@ function updateScaleHandles() {
     handle.scale.setScalar(Math.max(selected.scale.x, selected.scale.y, selected.scale.z));
   });
 }
-function selectObject(mesh) { if (!mesh) return; if (selectionOutline?.parent) selectionOutline.parent.remove(selectionOutline); selected = mesh; selectionOutline = new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry), new THREE.LineBasicMaterial({ color: 0xf26639, transparent: true, opacity: .95, depthTest: false })); selectionOutline.renderOrder = 10; mesh.add(selectionOutline); document.querySelector('#selectionLabel').textContent = mesh.name; document.querySelector('#propertyName').textContent = mesh.name; document.querySelector('#propertyType').textContent = 'MESH'; const hex = `#${meshMaterials(mesh)[0]?.color?.getHexString() || 'ffffff'}`; document.querySelector('#colorPicker').value = hex; document.querySelector('#colorValue').textContent = hex.toUpperCase(); syncInputs(); updateList(); }
-function clearSelection() { if (selectionOutline?.parent) selectionOutline.parent.remove(selectionOutline); selectionOutline = null; selected = null; document.querySelector('#selectionLabel').textContent = 'No selection'; updateScaleHandles(); updateList(); }
+function discardSelectionOutline() { if (!selectionOutline) return; selectionOutline.parent?.remove(selectionOutline); selectionOutline.geometry.dispose(); selectionOutline.material.dispose(); selectionOutline = null; }
+function selectObject(mesh) { if (!mesh) return; discardSelectionOutline(); selected = mesh; selectionOutline = new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry), new THREE.LineBasicMaterial({ color: 0xf26639, transparent: true, opacity: .95, depthTest: false })); selectionOutline.renderOrder = 10; mesh.add(selectionOutline); document.querySelector('#selectionLabel').textContent = mesh.name; document.querySelector('#propertyName').textContent = mesh.name; document.querySelector('#propertyType').textContent = 'MESH'; const hex = `#${meshMaterials(mesh)[0]?.color?.getHexString() || 'ffffff'}`; document.querySelector('#colorPicker').value = hex; document.querySelector('#colorValue').textContent = hex.toUpperCase(); syncInputs(); updateList(); }
+function clearSelection() { discardSelectionOutline(); selected = null; document.querySelector('#selectionLabel').textContent = 'No selection'; updateScaleHandles(); updateList(); }
 function syncInputs() { if (!selected) return; ['x','y','z'].forEach(axis => { document.querySelector(`#pos${axis.toUpperCase()}`).value = selected.position[axis].toFixed(2); document.querySelector(`#scale${axis.toUpperCase()}`).value = selected.scale[axis].toFixed(2); }); const rounding = document.querySelector('#edgeRounding'); if (rounding) { rounding.value = selected.userData.rounding || 0; document.querySelector('#edgeRoundingValue').textContent = Number(rounding.value).toFixed(2); rounding.disabled = !selected.name.startsWith('Cube'); } const color = meshMaterials(selected)[0]?.color?.getHexString() || 'ffffff'; document.querySelector('#selectedDot').style.background = `#${color}`; updateScaleHandles(); }
-function setEdgeRounding(value) { if (!selected || !selected.name.startsWith('Cube')) return; const rounding = Math.min(.7, Math.max(0, Number(value) || 0)); const oldGeometry = selected.geometry; selected.geometry = new RoundedBoxGeometry(1.55, 1.55, 1.55, 4, rounding); selected.geometry.computeVertexNormals(); selected.userData.rounding = rounding; oldGeometry.dispose(); if (selectionOutline?.parent) selectionOutline.parent.remove(selectionOutline); selectionOutline = new THREE.LineSegments(new THREE.EdgesGeometry(selected.geometry), new THREE.LineBasicMaterial({ color: 0xf26639, transparent: true, opacity: .95, depthTest: false })); selectionOutline.renderOrder = 10; selected.add(selectionOutline); document.querySelector('#edgeRoundingValue').textContent = rounding.toFixed(2); updateScaleHandles(); }
+function setEdgeRounding(value) { if (!selected || !selected.name.startsWith('Cube')) return; const rounding = Math.min(.7, Math.max(0, Number(value) || 0)); const oldGeometry = selected.geometry; selected.geometry = new RoundedBoxGeometry(1.55, 1.55, 1.55, 4, rounding); selected.geometry.computeVertexNormals(); selected.userData.rounding = rounding; oldGeometry.dispose(); discardSelectionOutline(); selectionOutline = new THREE.LineSegments(new THREE.EdgesGeometry(selected.geometry), new THREE.LineBasicMaterial({ color: 0xf26639, transparent: true, opacity: .95, depthTest: false })); selectionOutline.renderOrder = 10; selected.add(selectionOutline); document.querySelector('#edgeRoundingValue').textContent = rounding.toFixed(2); updateScaleHandles(); }
 function updateList() { const icon = mesh => mesh.name.startsWith('Sphere') ? '●' : mesh.name.startsWith('Cylinder') ? '▱' : mesh.name.startsWith('Torus') ? '○' : mesh.name.startsWith('Cone') ? '△' : mesh.name.startsWith('Crown') ? '♕' : '◇'; const list = document.querySelector('#objectList'); const partsList = document.querySelector('#partsList'); const rows = objects.map(mesh => `<button class="object-row ${mesh === selected ? 'selected' : ''}" data-name="${mesh.name}"><span>${icon(mesh)}</span><b>${mesh.name}</b><small>MESH</small></button>`).join(''); const partRows = objects.map(mesh => `<button class="part-row ${mesh === selected ? 'selected' : ''}" data-name="${mesh.name}"><span>${icon(mesh)}</span><b>${mesh.name}</b><small>MESH</small></button>`).join(''); if (list) list.innerHTML = rows; if (partsList) partsList.innerHTML = partRows; document.querySelector('#objectCount')?.replaceChildren(document.createTextNode(`${objects.length} objects`)); document.querySelector('#partsCount')?.replaceChildren(document.createTextNode(objects.length)); document.querySelectorAll('.object-row,.part-row').forEach(row => { row.onclick = () => selectObject(objects.find(item => item.name === row.dataset.name)); row.ondblclick = () => selectObject(objects.find(item => item.name === row.dataset.name)); }); }
 function resize() { const rect = viewport.getBoundingClientRect(); renderer.setSize(rect.width, rect.height, false); camera.aspect = rect.width / rect.height; camera.updateProjectionMatrix(); }
 new ResizeObserver(resize).observe(viewport); resize();
@@ -158,12 +213,12 @@ const renderScene = () => { controls.update(); renderer.render(scene, camera); }
 new MutationObserver(() => { if (appShell.getAttribute('aria-hidden') === 'false') requestAnimationFrame(() => { resize(); renderScene(); }); }).observe(appShell, { attributes: true, attributeFilter: ['aria-hidden'] });
 
 document.querySelectorAll('.tool[data-tool]').forEach(button => button.addEventListener('click', () => { document.querySelectorAll('.tool[data-tool]').forEach(item => item.classList.remove('active')); button.classList.add('active'); updateScaleHandles(); }));
-document.querySelector('#addCube').onclick = () => { rememberScene(); addObject('Cube', 0x999999, [Math.random() * 3 - 1.5, .8, Math.random() * 2 - 1]); };
-document.querySelector('#addSphere').onclick = () => { rememberScene(); addObject('Sphere', 0x7692bd, [Math.random() * 3 - 1.5, .85, Math.random() * 2 - 1]); };
-document.querySelector('#addCylinder').onclick = () => { rememberScene(); addObject('Cylinder', 0x87a479, [Math.random() * 3 - 1.5, .75, Math.random() * 2 - 1]); };
-document.querySelector('#addTorus').onclick = () => { rememberScene(); addObject('Torus', 0xd6a843, [Math.random() * 3 - 1.5, .9, Math.random() * 2 - 1]); };
-document.querySelector('#addCone').onclick = () => { rememberScene(); addObject('Cone', 0xc56b45, [Math.random() * 3 - 1.5, .9, Math.random() * 2 - 1]); };
-document.querySelector('#addCrown').onclick = () => { rememberScene(); addObject('Crown', 0xd6a843, [Math.random() * 3 - 1.5, .9, Math.random() * 2 - 1]); };
+document.querySelector('#addCube').onclick = () => addUserObject('Cube', 0x999999, [Math.random() * 3 - 1.5, .8, Math.random() * 2 - 1]);
+document.querySelector('#addSphere').onclick = () => addUserObject('Sphere', 0x7692bd, [Math.random() * 3 - 1.5, .85, Math.random() * 2 - 1]);
+document.querySelector('#addCylinder').onclick = () => addUserObject('Cylinder', 0x87a479, [Math.random() * 3 - 1.5, .75, Math.random() * 2 - 1]);
+document.querySelector('#addTorus').onclick = () => addUserObject('Torus', 0xd6a843, [Math.random() * 3 - 1.5, .9, Math.random() * 2 - 1]);
+document.querySelector('#addCone').onclick = () => addUserObject('Cone', 0xc56b45, [Math.random() * 3 - 1.5, .9, Math.random() * 2 - 1]);
+document.querySelector('#addCrown').onclick = () => addUserObject('Crown', 0xd6a843, [Math.random() * 3 - 1.5, .9, Math.random() * 2 - 1]);
 document.querySelector('#edgeRounding').addEventListener('input', event => { rememberScene(); setEdgeRounding(event.target.value); });
 ['posX','posY','posZ','scaleX','scaleY','scaleZ'].forEach(id => document.querySelector(`#${id}`).addEventListener('input', event => { if (!selected) return; const prop = id.startsWith('pos') ? 'position' : 'scale'; const axis = id.slice(-1).toLowerCase(); selected[prop][axis] = Number(event.target.value); }));
 
@@ -313,7 +368,7 @@ window.addEventListener('keydown', event => {
 });
 window.addEventListener('keyup', event => cameraKeys.delete(String(event.key || '').toLowerCase()));
 window.addEventListener('blur', () => cameraKeys.clear());
-function applySelectedColor(value) { if (!selected || !/^#[0-9a-f]{6}$/i.test(value)) return; meshMaterials(selected).forEach(material => { if (material.color) material.color.set(value); material.needsUpdate = true; }); document.querySelector('#colorValue').textContent = value.toUpperCase(); document.querySelector('#selectedDot').style.background = value; updateList(); }
+function applySelectedColor(value) { if (!selected || !/^#[0-9a-f]{6}$/i.test(value)) return; meshMaterials(selected).forEach(material => { if (material.color) material.color.set(value); material.needsUpdate = true; }); importedSerialization.delete(selected); document.querySelector('#colorValue').textContent = value.toUpperCase(); document.querySelector('#selectedDot').style.background = value; updateList(); }
 document.querySelector('#colorPicker').addEventListener('input', event => applySelectedColor(event.target.value));
 document.querySelector('#colorPicker').addEventListener('change', event => applySelectedColor(event.target.value));
 const partContext = document.querySelector('#partContext');
@@ -323,7 +378,7 @@ document.addEventListener('click', event => { if (!event.target.closest('#partCo
 document.querySelector('#renamePart').onclick = () => { if (!contextPart) return; const name = window.prompt('New name for this part:', contextPart.name); if (name?.trim()) { contextPart.name = name.trim(); selectObject(contextPart); updateList(); } partContext.classList.remove('open'); };
 document.querySelector('#duplicatePart').onclick = () => { if (!contextPart) return; selectObject(contextPart); duplicateSelected(true); contextPart = selected; partContext.classList.remove('open'); };
 document.querySelector('#deletePart').onclick = () => { if (!contextPart) return; rememberScene(); const index = objects.indexOf(contextPart); if (index >= 0) objects.splice(index, 1); scene.remove(contextPart); if (!objects.length) addObject('Cube', 0x999999, [0, .8, 0]); selectObject(objects[Math.max(0, index - 1)] || objects[0]); updateList(); contextPart = null; partContext.classList.remove('open'); };
-[['roughness','roughnessValue'],['metallic','metallicValue']].forEach(([id, output]) => document.querySelector(`#${id}`).addEventListener('input', event => { if (selected) meshMaterials(selected).forEach(material => { material[id] = Number(event.target.value); }); document.querySelector(`#${output}`).textContent = Number(event.target.value).toFixed(2); }));
+[['roughness','roughnessValue'],['metallic','metallicValue']].forEach(([id, output]) => document.querySelector(`#${id}`).addEventListener('input', event => { if (selected) { meshMaterials(selected).forEach(material => { material[id] = Number(event.target.value); }); importedSerialization.delete(selected); } document.querySelector(`#${output}`).textContent = Number(event.target.value).toFixed(2); }));
 
 function generatedCode() {
   const geometryCode = mesh => {
@@ -352,10 +407,18 @@ document.querySelector('#applyCode').onclick = () => {
     parsed.push({ name: match[1], type: match[2] === 'Box' || match[2] === 'RoundedBox' ? 'Cube' : match[2], color: parseInt(colorMatch[1], 16), position: positionMatch.slice(1).map(Number), rotation: rotationMatch?.slice(1).map(Number), scale: scaleMatch?.slice(1).map(Number) });
   }
   if (!parsed.length) { document.querySelector('#codeStatus').textContent = 'No supported THREE.Mesh code found. Use Box, RoundedBox, Sphere, Cylinder, Torus, or Cone geometry.'; return; }
+  if (parsed.length > MAX_SCENE_OBJECTS) { document.querySelector('#codeStatus').textContent = `A scene can contain at most ${MAX_SCENE_OBJECTS} objects.`; return; }
+  let parsedTriangles = 0;
+  for (const item of parsed) {
+    const mesh = makeMesh(item.type, item.color);
+    parsedTriangles += triangleCount(mesh);
+    mesh.geometry.dispose();
+    mesh.material.dispose();
+    if (parsedTriangles > MAX_SCENE_TRIANGLES) { document.querySelector('#codeStatus').textContent = `A scene can contain at most ${MAX_SCENE_TRIANGLES.toLocaleString()} triangles.`; return; }
+  }
   rememberScene();
-  objects.forEach(mesh => scene.remove(mesh)); objects.length = 0;
-  parsed.forEach((item, index) => { addObject(item.type, item.color, item.position); objects[index].name = item.name; if (item.rotation) objects[index].rotation.set(...item.rotation); if (item.scale) objects[index].scale.set(...item.scale); });
-  selectObject(objects[0]); updateList(); document.querySelector('#codeStatus').textContent = 'Scene applied.';
+  restoreScene(parsed.map(item => ({ ...item, name: item.name })));
+  document.querySelector('#codeStatus').textContent = 'Scene applied.';
 };
 
 document.querySelector('#avatarButton').onclick = async () => { try { await apiRequest('/api/auth/logout', { method: 'POST' }); } catch (error) { } localStorage.removeItem('modelrUser'); appShell.setAttribute('aria-hidden', 'true'); authScreen.style.display = 'grid'; document.querySelector('#passwordInput').value = ''; };
@@ -381,22 +444,28 @@ async function apiRequest(path, options = {}) {
   if (!response.ok) { const failure = new Error(result.error || 'Cloud request failed.'); failure.status = response.status; throw failure; }
   return result;
 }
+function prepareJsonRequest(data) {
+  const body = JSON.stringify(data);
+  if (body.length > MAX_REQUEST_BODY_CHARS) throw new Error('This scene or migration is too large to upload. Reduce its size first.');
+  return body;
+}
 async function syncCloudProjects() {
   const cloudProjects = await apiRequest('/api/projects');
   localStorage.setItem('modelrProjects', JSON.stringify(cloudProjects));
   const previousName = localStorage.getItem('modelrProjectName');
   const activeProject = cloudProjects.find(project => project.name === previousName) || cloudProjects[0];
   if (activeProject) {
+    const fullProject = await apiRequest(`/api/projects/${encodeURIComponent(activeProject.id)}`);
     currentProjectName = activeProject.name;
     localStorage.setItem('modelrProjectName', currentProjectName);
-    localStorage.setItem('modelrSceneV2', JSON.stringify(activeProject.scene));
+    localStorage.removeItem('modelrSceneV2');
     document.querySelector('#projectName').textContent = currentProjectName;
-    restoreScene(activeProject.scene);
+    restoreScene(fullProject.scene);
   } else {
     currentProjectName = '';
     localStorage.removeItem('modelrProjectName');
+    localStorage.removeItem('modelrSceneV2');
     restoreScene([]);
-    localStorage.setItem('modelrSceneV2', JSON.stringify(sceneSnapshot()));
     document.querySelector('#projectName').textContent = 'Untitled scene';
   }
 }
@@ -410,9 +479,10 @@ function renderProjects() {
     if (projectModalMode === 'confirm') {
       const updatedProject = { ...project, objects: objects.length, scene: sceneSnapshot() };
       try {
-        const savedProject = await apiRequest('/api/projects', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updatedProject) });
-        localStorage.setItem('modelrProjects', JSON.stringify(projects().map(item => item.id === project.id ? savedProject : item)));
-        localStorage.setItem('modelrSceneV2', JSON.stringify(updatedProject.scene));
+        const savedProject = await apiRequest('/api/projects', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: prepareJsonRequest(updatedProject) });
+        const { scene, ...projectMetadata } = savedProject;
+        localStorage.setItem('modelrProjects', JSON.stringify(projects().map(item => item.id === project.id ? projectMetadata : item)));
+        localStorage.removeItem('modelrSceneV2');
         currentProjectName = project.name;
         localStorage.setItem('modelrProjectName', currentProjectName);
         document.querySelector('#projectName').textContent = currentProjectName;
@@ -425,7 +495,29 @@ function renderProjects() {
     openProjectWithLoader(project);
   });
 }
-function openProjectWithLoader(project) { const loader = document.querySelector('#projectLoading'); loader.classList.add('open'); loader.setAttribute('aria-hidden', 'false'); setTimeout(() => { restoreScene(project.scene); localStorage.setItem('modelrSceneV2', JSON.stringify(project.scene)); currentProjectName = project.name; localStorage.setItem('modelrProjectName', currentProjectName); document.querySelector('#projectName').textContent = currentProjectName; projectModal.classList.remove('open'); projectModal.style.display = 'none'; authScreen.style.display = 'none'; appShell.setAttribute('aria-hidden', 'false'); requestAnimationFrame(() => { resize(); renderScene(); loader.classList.remove('open'); loader.setAttribute('aria-hidden', 'true'); }); }, 5000); }
+async function openProjectWithLoader(project) {
+  const loader = document.querySelector('#projectLoading');
+  loader.classList.add('open');
+  loader.setAttribute('aria-hidden', 'false');
+  try {
+    const fullProject = await apiRequest(`/api/projects/${encodeURIComponent(project.id)}`);
+    restoreScene(fullProject.scene);
+    localStorage.removeItem('modelrSceneV2');
+    currentProjectName = fullProject.name;
+    localStorage.setItem('modelrProjectName', currentProjectName);
+    document.querySelector('#projectName').textContent = currentProjectName;
+    projectModal.classList.remove('open');
+    projectModal.style.display = 'none';
+    authScreen.style.display = 'none';
+    appShell.setAttribute('aria-hidden', 'false');
+    requestAnimationFrame(() => { resize(); renderScene(); });
+  } catch (error) {
+    projectStatus.textContent = `Could not open project: ${error.message}`;
+  } finally {
+    loader.classList.remove('open');
+    loader.setAttribute('aria-hidden', 'true');
+  }
+}
 function openProjectModal(mode) { projectModalMode = mode; document.querySelector('#projectModalEyebrow').textContent = mode === 'confirm' ? 'CLOSE PROJECT' : mode === 'projects' ? 'PROJECTS' : 'SAVE PROJECT'; document.querySelector('#projectModalTitle').textContent = mode === 'confirm' ? 'Do you want to save this project?' : mode === 'projects' ? 'Your projects.' : 'Save your project.'; document.querySelector('#projectModalHelp').textContent = mode === 'confirm' ? 'Your changes will not be saved.' : mode === 'projects' ? 'Open a previously saved project.' : 'Give your project a name so you can open it later.'; projectInput.style.display = mode === 'save' ? 'block' : 'none'; document.querySelector('#confirmProjectModal').textContent = mode === 'confirm' ? 'Yes, save' : mode === 'projects' ? 'Close' : 'Save project'; document.querySelector('#cancelProjectModal').textContent = mode === 'confirm' ? 'No, close' : 'Cancel'; projectStatus.textContent = ''; if (mode === 'save') projectInput.value = currentProjectName; renderProjects(); projectModal.classList.add('open'); projectModal.style.display = 'grid'; }
 function showProjectList() { authScreen.style.display = 'none'; appShell.setAttribute('aria-hidden', 'true'); openProjectModal('projects'); projectModal.classList.add('open'); projectModal.style.setProperty('display', 'grid', 'important'); projectModal.style.setProperty('visibility', 'visible', 'important'); projectModal.style.setProperty('opacity', '1', 'important'); projectModal.style.setProperty('z-index', '9999', 'important'); const card = document.querySelector('.project-card'); card.style.setProperty('display', 'block', 'important'); card.style.setProperty('visibility', 'visible', 'important'); card.style.setProperty('opacity', '1', 'important'); }
 async function saveProject() {
@@ -435,11 +527,13 @@ async function saveProject() {
   const existing = projects().find(project => project.name === name);
   const project = { id: existing?.id || `${Date.now()}-${name}`, name, objects: objects.length, updatedAt: new Date().toISOString(), scene };
   try {
-    const savedProject = await apiRequest('/api/projects', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(project) });
+    const requestBody = prepareJsonRequest(project);
+    const savedProject = await apiRequest('/api/projects', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: requestBody });
+    const { scene: savedScene, ...projectMetadata } = savedProject;
     const saved = projects().filter(item => item.id !== savedProject.id);
-    saved.unshift(savedProject);
+    saved.unshift(projectMetadata);
     localStorage.setItem('modelrProjects', JSON.stringify(saved));
-    localStorage.setItem('modelrSceneV2', JSON.stringify(scene));
+    localStorage.removeItem('modelrSceneV2');
     localStorage.setItem('modelrProjectName', name);
   } catch (error) { projectStatus.textContent = `Could not save to cloud: ${error.message}`; return; }
   currentProjectName = name;
@@ -447,7 +541,7 @@ async function saveProject() {
   if (closeAfterSave) { closeAfterSave = false; showProjectList(); }
   else { projectModal.classList.remove('open'); projectModal.style.display = 'none'; }
 }
-function autoSaveScene() { try { localStorage.setItem('modelrSceneV2', JSON.stringify(sceneSnapshot())); } catch (error) { /* Keep the editor usable when browser storage is unavailable. */ } }
+function autoSaveScene() { if (localStorage.getItem('modelrCloudUser')) return; try { localStorage.setItem('modelrSceneV2', JSON.stringify(sceneSnapshot())); } catch (error) { /* Keep the editor usable when browser storage is unavailable. */ } }
 function closeProject() { showProjectList(); }
 document.querySelector('#fileMenuButton').onclick = event => { event.stopPropagation(); fileDropdown.classList.toggle('open'); };
 document.addEventListener('click', event => { if (!event.target.closest('.file-menu')) fileDropdown.classList.remove('open'); });
@@ -466,8 +560,12 @@ modelImportInput.addEventListener('change', async event => {
     let modelPath = '';
     const zipFile = files.find(file => /\.zip$/i.test(file.name));
     if (zipFile) {
+      if (zipFile.size > MAX_IMPORT_FILE_BYTES) throw new Error(`ZIP files must be smaller than ${MAX_IMPORT_FILE_BYTES / 1024 / 1024} MB.`);
       const archive = await JSZip.loadAsync(await zipFile.arrayBuffer());
       const entries = Object.values(archive.files).filter(entry => !entry.dir);
+      if (entries.length > MAX_IMPORT_ARCHIVE_ENTRIES) throw new Error(`ZIP files may contain at most ${MAX_IMPORT_ARCHIVE_ENTRIES} files.`);
+      const uncompressedSize = entries.reduce((total, entry) => total + (entry._data?.uncompressedSize || 0), 0);
+      if (uncompressedSize > MAX_IMPORT_ARCHIVE_BYTES) throw new Error(`Unpacked ZIP files must total less than ${MAX_IMPORT_ARCHIVE_BYTES / 1024 / 1024} MB.`);
       const modelEntry = entries.find(entry => /\.(gltf|glb)$/i.test(entry.name));
       if (!modelEntry) throw new Error('No .gltf or .glb model was found in this ZIP.');
       modelFileName = modelEntry.name;
@@ -482,6 +580,8 @@ modelImportInput.addEventListener('change', async event => {
         archiveUrls.set(entry.name, url);
       }));
     } else {
+      const importSize = files.reduce((total, file) => total + file.size, 0);
+      if (importSize > MAX_IMPORT_FILE_BYTES) throw new Error(`Selected model and texture files must total less than ${MAX_IMPORT_FILE_BYTES / 1024 / 1024} MB.`);
       const modelFile = files.find(file => /\.(gltf|glb)$/i.test(file.name));
       if (!modelFile) return;
       modelFileName = modelFile.name;
@@ -505,6 +605,15 @@ modelImportInput.addEventListener('change', async event => {
     const root = gltf.scene || gltf.scenes[0];
     if (!root) throw new Error('The selected file contains no scene.');
     root.updateMatrixWorld(true);
+    let importedCount = 0;
+    let importedTriangles = 0;
+    root.traverse(node => {
+      if (!node.isMesh) return;
+      importedCount++;
+      importedTriangles += triangleCount(node);
+      if (objects.length + importedCount > MAX_SCENE_OBJECTS) throw new Error(`A scene can contain at most ${MAX_SCENE_OBJECTS} objects.`);
+      if (sceneTriangleCount() + importedTriangles > MAX_SCENE_TRIANGLES) throw new Error(`A scene can contain at most ${MAX_SCENE_TRIANGLES.toLocaleString()} triangles.`);
+    });
     const imported = [];
     root.traverse(node => {
       if (!node.isMesh) return;
@@ -583,17 +692,17 @@ authForm.addEventListener('submit', async event => {
     if (authMode === 'signup') {
       const cachedUser = localStorage.getItem('modelrCloudUser');
       const migrationProjects = !cachedUser || cachedUser === email ? projects() : [];
-      result = await apiRequest('/api/auth/signup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password, projects: migrationProjects }) });
+      result = await apiRequest('/api/auth/signup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: prepareJsonRequest({ email, password, projects: migrationProjects }) });
     } else {
       try {
-        result = await apiRequest('/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password }) });
+        result = await apiRequest('/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: prepareJsonRequest({ email, password }) });
       } catch (loginError) {
         let legacyUsers = {};
         try { legacyUsers = JSON.parse(localStorage.getItem('modelrUsers') || '{}'); } catch (error) { }
         if (loginError.status !== 401 || legacyUsers[email] !== password) throw loginError;
         const cachedUser = localStorage.getItem('modelrCloudUser');
         const migrationProjects = !cachedUser || cachedUser === email ? projects() : [];
-        result = await apiRequest('/api/auth/signup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password, projects: migrationProjects }) });
+        result = await apiRequest('/api/auth/signup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: prepareJsonRequest({ email, password, projects: migrationProjects }) });
       }
     }
     localStorage.removeItem('modelrUsers');
