@@ -996,7 +996,7 @@ renderer.domElement.addEventListener('pointerdown', event => {
   const rotateHit = activeTool === 'rotate' ? raycaster.intersectObjects(rotateHandles)[0] : null;
   if (rotateHit && selected) {
     rememberScene();
-    dragStart = { x: event.clientX, y: event.clientY, rotation: selected.rotation.clone(), handle: rotateHit.object };
+    dragStart = { x: event.clientX, y: event.clientY, rotation: selected.rotation.clone(), quaternion: selected.quaternion.clone(), handle: rotateHit.object };
     controls.enabled = false;
     return;
   }
@@ -1094,7 +1094,10 @@ renderer.domElement.addEventListener('pointermove', event => {
   if (dragStart.handle?.userData.rotateHandle) {
     const axis = dragStart.handle.userData.axis;
     const delta = axis === 'y' ? dx : -dy;
-    selected.rotation[axis] = snappedRotation(dragStart.rotation[axis] + delta);
+    const axisDirection = new THREE.Vector3();
+    axisDirection[axis] = 1;
+    const axisRotation = new THREE.Quaternion().setFromAxisAngle(axisDirection, snappedRotation(delta));
+    selected.quaternion.copy(axisRotation.multiply(dragStart.quaternion));
     syncInputs();
     return;
   }
