@@ -1191,7 +1191,23 @@ renderer.domElement.addEventListener('pointerdown', event => {
   const rotateHit = activeTool === 'rotate' ? raycaster.intersectObjects(rotateHandles)[0] : null;
   if (rotateHit && selected) {
     rememberScene();
-    dragStart = { x: event.clientX, y: event.clientY, rotation: selected.rotation.clone(), quaternion: selected.quaternion.clone(), handle: rotateHit.object };
+    const axis = rotateHit.object.userData.axis;
+    const rotationAxis = new THREE.Vector3();
+    rotationAxis[axis] = 1;
+    const rotationPlane = new THREE.Plane().setFromNormalAndCoplanarPoint(rotationAxis, selected.position);
+    const rotationStartPoint = raycaster.ray.intersectPlane(rotationPlane, new THREE.Vector3());
+    const rotationStartVector = rotationStartPoint?.sub(selected.position).normalize() || null;
+    dragStart = {
+      x: event.clientX,
+      y: event.clientY,
+      quaternion: selected.quaternion.clone(),
+      handle: rotateHit.object,
+      rotationAxis,
+      rotationPlane,
+      rotationStartVector,
+      rotationLastAngle: 0,
+      rotationDelta: 0
+    };
     controls.enabled = false;
     return;
   }
@@ -1311,11 +1327,20 @@ renderer.domElement.addEventListener('pointermove', event => {
     return;
   }
   if (dragStart.handle?.userData.rotateHandle) {
-    const axis = dragStart.handle.userData.axis;
-    const delta = axis === 'y' ? dx : -dy;
-    const axisDirection = new THREE.Vector3();
-    axisDirection[axis] = 1;
-    const axisRotation = new THREE.Quaternion().setFromAxisAngle(axisDirection, snappedRotation(delta));
+    const point = raycaster.ray.intersectPlane(dragStart.rotationPlane, new THREE.Vector3());
+    if (!point || !dragStart.rotationStartVector) return;
+    const currentVector = point.sub(selected.position).normalize();
+    const cross = new THREE.Vector3().crossVectors(dragStart.rotationStartVector, currentVector);
+    const angle = Math.atan2(
+      cross.dot(dragStart.rotationAxis),
+      THREE.MathUtils.clamp(dragStart.rotationStartVector.dot(currentVector), -1, 1)
+    );
+    let angleDelta = angle - dragStart.rotationLastAngle;
+    if (angleDelta > Math.PI) angleDelta -= Math.PI * 2;
+    else if (angleDelta < -Math.PI) angleDelta += Math.PI * 2;
+    dragStart.rotationDelta += angleDelta;
+    dragStart.rotationLastAngle = angle;
+    const axisRotation = new THREE.Quaternion().setFromAxisAngle(dragStart.rotationAxis, snappedRotation(dragStart.rotationDelta));
     selected.quaternion.copy(axisRotation.multiply(dragStart.quaternion));
     syncInputs();
     return;
