@@ -532,8 +532,6 @@ function updateTimeline() {
   frameInput.value = String(Math.round(currentFrame));
   endInput.value = String(endFrame);
   document.querySelectorAll('#timelineRuler > span').forEach((label, index) => { label.textContent = String(Math.round(endFrame * index / 6)); });
-  const percent = endFrame ? THREE.MathUtils.clamp(currentFrame / endFrame, 0, 1) * 100 : 0;
-  document.querySelector('#timelinePlayhead').style.left = `${percent}%`;
   const keys = selected ? keyframesFor(selected) : [];
   const markers = document.querySelector('#timelineKeyframes');
   const tracks = ['location', 'rotation', 'scale', 'color'];
