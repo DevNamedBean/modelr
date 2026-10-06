@@ -5,7 +5,7 @@ import { GLTFLoader } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/
 import { GLTFExporter } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/exporters/GLTFExporter.js';
 import JSZip from 'https://cdn.jsdelivr.net/npm/jszip@3.10.1/+esm';
 import { evaluateDriverExpression, interpolateKeyframeAmount } from './animation-core.js';
-import { bevelEdge, extrudeTriangle, insetTriangle } from './modeling-core.js';
+import { bevelEdge, extrudeTriangle, insetTriangle, sculptStroke } from './modeling-core.js';
 
 const objects = [];
 const undoStack = [];
@@ -129,6 +129,24 @@ function sceneTriangleCount() { return objects.reduce((total, mesh) => total + t
 function sceneLimitNotice(message) { window.alert(message); }
 function addObject(type, color = 0x999999, position = [0, .8, 0]) { if (objects.length >= MAX_SCENE_OBJECTS) { sceneLimitNotice(`This scene is limited to ${MAX_SCENE_OBJECTS} objects to keep the editor responsive.`); return null; } const mesh = makeMesh(type, color); if (sceneTriangleCount() + triangleCount(mesh) > MAX_SCENE_TRIANGLES) { mesh.geometry.dispose(); mesh.material.dispose(); sceneLimitNotice(`This scene is limited to ${MAX_SCENE_TRIANGLES.toLocaleString()} triangles to keep the editor responsive.`); return null; } mesh.position.set(...position); mesh.name = `${type} ${objectIndex++}`; scene.add(mesh); objects.push(mesh); selectObject(mesh); updateList(); return mesh; }
 function meshMaterials(mesh) { return (Array.isArray(mesh.material) ? mesh.material : [mesh.material]).filter(Boolean); }
+function syncMaterialInputs(mesh) {
+  const material = meshMaterials(mesh)[0];
+  if (!material) return;
+  const color = `#${material.color?.getHexString() || 'ffffff'}`;
+  const emissive = `#${material.emissive?.getHexString() || '000000'}`;
+  document.querySelector('#colorPicker').value = color;
+  document.querySelector('#colorValue').textContent = color.toUpperCase();
+  document.querySelector('#roughness').value = material.roughness ?? .5;
+  document.querySelector('#roughnessValue').textContent = Number(material.roughness ?? .5).toFixed(2);
+  document.querySelector('#metallic').value = material.metalness ?? 0;
+  document.querySelector('#metallicValue').textContent = Number(material.metalness ?? 0).toFixed(2);
+  document.querySelector('#emissionColor').value = emissive;
+  document.querySelector('#emissionColorValue').textContent = emissive.toUpperCase();
+  document.querySelector('#emissionStrength').value = material.emissiveIntensity ?? 0;
+  document.querySelector('#emissionStrengthValue').textContent = Number(material.emissiveIntensity ?? 0).toFixed(2);
+  document.querySelector('#materialOpacity').value = material.opacity ?? 1;
+  document.querySelector('#materialOpacityValue').textContent = Number(material.opacity ?? 1).toFixed(2);
+}
 function restoreImportedMesh(item) { const mesh = new THREE.ObjectLoader().parse(item.serialized); mesh.name = item.name || mesh.name; if (item.position) mesh.position.fromArray(item.position); if (item.rotation) mesh.rotation.fromArray(item.rotation); if (item.scale) mesh.scale.fromArray(item.scale); mesh.userData.modelrImported = true; mesh.userData.modelrGroupId ||= 'legacy-imported'; mesh.userData.modelrGroupName ||= 'Imported model'; importedSerialization.set(mesh, item.serialized); scene.add(mesh); objects.push(mesh); return mesh; }
 addObject('Cube', 0x999999, [0, .8, 0]).name = 'Cube 1';
 let savedScene = null;
@@ -665,7 +683,7 @@ function serializedTriangleCount(item) {
   const vertexCount = position?.count || (position?.array?.length / (position?.itemSize || 3));
   return Math.floor((indexCount || vertexCount || 0) / 3);
 }
-function sceneSnapshot() { return objects.map(mesh => { const material = meshMaterials(mesh)[0]; const snapshot = { name: mesh.name, type: mesh.name.startsWith('Sphere') ? 'Sphere' : mesh.name.startsWith('Cylinder') ? 'Cylinder' : mesh.name.startsWith('Torus') ? 'Torus' : mesh.name.startsWith('Cone') ? 'Cone' : mesh.name.startsWith('Crown') ? 'Crown' : 'Cube', color: material?.color?.getHexString() || '999999', position: mesh.position.toArray(), scale: mesh.scale.toArray(), rotation: mesh.rotation.toArray(), rounding: mesh.userData.rounding || 0, visible: mesh.visible, animationId: mesh.userData.modelrAnimationId, keyframes: (mesh.userData.modelrKeyframes || []).map(keyframe => ({ ...keyframe, position: [...keyframe.position], rotation: [...keyframe.rotation], scale: [...keyframe.scale], shapeWeights: [...(keyframe.shapeWeights || [])] })), actions: structuredClone(mesh.userData.modelrActions || []), nlaStrips: structuredClone(mesh.userData.modelrNlaStrips || []), drivers: structuredClone(mesh.userData.modelrDrivers || []), shapeBasis: mesh.userData.modelrShapeBasis ? [...mesh.userData.modelrShapeBasis] : null, shapeKeys: structuredClone(mesh.userData.modelrShapeKeys || []), timelineFrame: currentFrame, timelineEnd: endFrame, loopPlayback }; if (mesh.userData.modelrImported) { snapshot.type = 'Imported'; snapshot.serialized = importedMeshSnapshot(mesh); } else if (mesh.userData.modelrVertexEdited) { snapshot.geometry = mesh.geometry.toJSON(); } return snapshot; }); }
+function sceneSnapshot() { return objects.map(mesh => { const material = meshMaterials(mesh)[0]; const snapshot = { name: mesh.name, type: mesh.name.startsWith('Sphere') ? 'Sphere' : mesh.name.startsWith('Cylinder') ? 'Cylinder' : mesh.name.startsWith('Torus') ? 'Torus' : mesh.name.startsWith('Cone') ? 'Cone' : mesh.name.startsWith('Crown') ? 'Crown' : 'Cube', color: material?.color?.getHexString() || '999999', roughness: material?.roughness, metalness: material?.metalness, emissive: material?.emissive?.getHexString(), emissiveIntensity: material?.emissiveIntensity, opacity: material?.opacity, transparent: material?.transparent, position: mesh.position.toArray(), scale: mesh.scale.toArray(), rotation: mesh.rotation.toArray(), rounding: mesh.userData.rounding || 0, visible: mesh.visible, animationId: mesh.userData.modelrAnimationId, keyframes: (mesh.userData.modelrKeyframes || []).map(keyframe => ({ ...keyframe, position: [...keyframe.position], rotation: [...keyframe.rotation], scale: [...keyframe.scale], shapeWeights: [...(keyframe.shapeWeights || [])] })), actions: structuredClone(mesh.userData.modelrActions || []), nlaStrips: structuredClone(mesh.userData.modelrNlaStrips || []), drivers: structuredClone(mesh.userData.modelrDrivers || []), shapeBasis: mesh.userData.modelrShapeBasis ? [...mesh.userData.modelrShapeBasis] : null, shapeKeys: structuredClone(mesh.userData.modelrShapeKeys || []), timelineFrame: currentFrame, timelineEnd: endFrame, loopPlayback }; if (mesh.userData.modelrImported) { snapshot.type = 'Imported'; snapshot.serialized = importedMeshSnapshot(mesh); } else if (mesh.userData.modelrVertexEdited) { snapshot.geometry = mesh.geometry.toJSON(); } return snapshot; }); }
 function rememberScene() { undoStack.push(sceneSnapshot()); if (undoStack.length > 50) undoStack.shift(); redoStack.length = 0; }
 function addUserObject(type, color, position) {
   if (objects.length >= MAX_SCENE_OBJECTS) { sceneLimitNotice(`This scene is limited to ${MAX_SCENE_OBJECTS} objects to keep the editor responsive.`); return; }
@@ -692,6 +710,17 @@ function restoreScene(snapshot) {
     const type = item.type || 'Cube';
     if (item.serialized && restoredTriangles + serializedTriangleCount(item) > MAX_SCENE_TRIANGLES) { skippedObjects = true; return; }
     const mesh = item.serialized ? new THREE.ObjectLoader().parse(item.serialized) : makeMesh(type, parseInt(item.color || '999999', 16));
+    meshMaterials(mesh).forEach(material => {
+      if (Number.isFinite(item.roughness)) material.roughness = THREE.MathUtils.clamp(item.roughness, 0, 1);
+      if (Number.isFinite(item.metalness)) material.metalness = THREE.MathUtils.clamp(item.metalness, 0, 1);
+      if (typeof item.emissive === 'string' && /^#[0-9a-f]{6}$/i.test(`#${item.emissive}`)) material.emissive?.set(`#${item.emissive}`);
+      if (Number.isFinite(item.emissiveIntensity)) material.emissiveIntensity = THREE.MathUtils.clamp(item.emissiveIntensity, 0, 8);
+      if (Number.isFinite(item.opacity)) {
+        material.opacity = THREE.MathUtils.clamp(item.opacity, .05, 1);
+        material.transparent = material.opacity < 1 || item.transparent === true;
+      }
+      material.needsUpdate = true;
+    });
     if (item.geometry && !item.serialized) { mesh.geometry.dispose(); mesh.geometry = new THREE.BufferGeometryLoader().parse(item.geometry); mesh.userData.modelrVertexEdited = true; }
     mesh.name = String(item.name || `${type} ${index + 1}`);
     if (item.position) mesh.position.fromArray(item.position);
@@ -924,8 +953,43 @@ function applyMeshOperation(operation) {
     window.alert(error.message);
   }
 }
+function sculptAdjacency(geometry) {
+  const position = geometry.attributes.position;
+  const index = geometry.index;
+  const keyFor = index => `${position.getX(index).toFixed(6)},${position.getY(index).toFixed(6)},${position.getZ(index).toFixed(6)}`;
+  const representative = new Map();
+  for (let vertexIndex = 0; vertexIndex < position.count; vertexIndex++) {
+    const key = keyFor(vertexIndex);
+    if (!representative.has(key)) representative.set(key, vertexIndex);
+  }
+  const neighbors = new Map(Array.from(representative.keys(), key => [key, new Set()]));
+  const triangleIndices = index?.count || position.count;
+  for (let offset = 0; offset + 2 < triangleIndices; offset += 3) {
+    const keys = [0, 1, 2].map(corner => keyFor(index ? index.getX(offset + corner) : offset + corner));
+    for (let corner = 0; corner < 3; corner++) {
+      neighbors.get(keys[corner]).add(keys[(corner + 1) % 3]);
+      neighbors.get(keys[corner]).add(keys[(corner + 2) % 3]);
+    }
+  }
+  return Array.from({ length: position.count }, (_, index) =>
+    Array.from(neighbors.get(keyFor(index)), key => representative.get(key)));
+}
+function applySculptDabs() {
+  const position = selected.geometry.attributes.position;
+  const vertices = Array.from({ length: position.count }, (_, index) => [
+    dragStart.basePositions[index * 3],
+    dragStart.basePositions[index * 3 + 1],
+    dragStart.basePositions[index * 3 + 2]
+  ]);
+  const sculpted = sculptStroke(vertices, dragStart.adjacency, dragStart.dabs);
+  sculpted.forEach((vertex, index) => position.setXYZ(index, ...vertex));
+  position.needsUpdate = true;
+  selected.geometry.computeVertexNormals();
+  selected.geometry.computeBoundingBox();
+  selected.geometry.computeBoundingSphere();
+}
 function setEditorMode(mode) {
-  editorMode = mode === 'edit' ? 'edit' : 'object';
+  editorMode = ['edit', 'sculpt'].includes(mode) ? mode : 'object';
   selectedVertexIndex = null;
   selectedFaceIndex = null;
   selectedComponentPoints = [];
@@ -936,17 +1000,22 @@ function setEditorMode(mode) {
   });
   document.querySelector('#editComponentTools').classList.toggle('open', editorMode === 'edit');
   document.querySelector('#meshOperations').classList.toggle('open', editorMode === 'edit');
-  const label = editorMode === 'edit' ? `${componentMode[0].toUpperCase()}${componentMode.slice(1)} Edit` : 'Object Mode';
+  document.querySelector('#sculptTools').classList.toggle('open', editorMode === 'sculpt');
+  const label = editorMode === 'edit'
+    ? `${componentMode[0].toUpperCase()}${componentMode.slice(1)} Edit`
+    : editorMode === 'sculpt' ? 'Sculpt Mode' : 'Object Mode';
   document.querySelector('#editorModeLabel').textContent = label;
   document.querySelector('.viewport-hint').textContent = editorMode === 'edit'
     ? `Click a ${componentMode} to select · Drag to move · Tab: Object Mode`
+    : editorMode === 'sculpt'
+      ? 'Drag on the selected mesh to sculpt · Tab: Object Mode'
     : 'Right-click: orbit · Scroll: zoom · Drag: transform · Tab: Edit Mode';
   updateVertexOverlay();
   updateScaleHandles();
 }
-function selectObject(mesh) { if (!mesh) return; clearVertexOverlay(); discardSelectionOutline(); selected = mesh; selectedVertexIndex = null; selectedComponentPoints = []; keyframesFor(mesh); selectionOutline = new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry), new THREE.LineBasicMaterial({ color: 0xf26639, transparent: true, opacity: .95, depthTest: false })); selectionOutline.renderOrder = 10; mesh.add(selectionOutline); document.querySelector('#selectionLabel').textContent = mesh.name; document.querySelector('#propertyName').textContent = mesh.name; document.querySelector('#propertyType').textContent = 'MESH'; const hex = `#${meshMaterials(mesh)[0]?.color?.getHexString() || 'ffffff'}`; document.querySelector('#colorPicker').value = hex; document.querySelector('#colorValue').textContent = hex.toUpperCase(); syncInputs(); updateVertexOverlay(); updateTimeline(); updateList(); if (document.querySelector('#animationWorkspace')?.classList.contains('open')) updateAnimationWorkspace(); }
+function selectObject(mesh) { if (!mesh) return; clearVertexOverlay(); discardSelectionOutline(); selected = mesh; selectedVertexIndex = null; selectedComponentPoints = []; keyframesFor(mesh); selectionOutline = new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry), new THREE.LineBasicMaterial({ color: 0xf26639, transparent: true, opacity: .95, depthTest: false })); selectionOutline.renderOrder = 10; mesh.add(selectionOutline); document.querySelector('#selectionLabel').textContent = mesh.name; document.querySelector('#propertyName').textContent = mesh.name; document.querySelector('#propertyType').textContent = 'MESH'; syncMaterialInputs(mesh); syncInputs(); updateVertexOverlay(); updateTimeline(); updateList(); if (document.querySelector('#animationWorkspace')?.classList.contains('open')) updateAnimationWorkspace(); }
 function clearSelection() { clearVertexOverlay(); discardSelectionOutline(); selected = null; selectedVertexIndex = null; document.querySelector('#selectionLabel').textContent = 'No selection'; updateScaleHandles(); updateTimeline(); updateList(); if (document.querySelector('#animationWorkspace')?.classList.contains('open')) updateAnimationWorkspace(); }
-function syncInputs() { if (!selected) return; ['x','y','z'].forEach(axis => { document.querySelector(`#pos${axis.toUpperCase()}`).value = selected.position[axis].toFixed(2); document.querySelector(`#scale${axis.toUpperCase()}`).value = selected.scale[axis].toFixed(2); }); const rounding = document.querySelector('#edgeRounding'); if (rounding) { rounding.value = selected.userData.rounding || 0; document.querySelector('#edgeRoundingValue').textContent = Number(rounding.value).toFixed(2); rounding.disabled = !selected.name.startsWith('Cube'); } const color = meshMaterials(selected)[0]?.color?.getHexString() || 'ffffff'; document.querySelector('#selectedDot').style.background = `#${color}`; document.querySelector('#colorPicker').value = `#${color}`; document.querySelector('#colorValue').textContent = `#${color.toUpperCase()}`; updateScaleHandles(); }
+function syncInputs() { if (!selected) return; ['x','y','z'].forEach(axis => { document.querySelector(`#pos${axis.toUpperCase()}`).value = selected.position[axis].toFixed(2); document.querySelector(`#scale${axis.toUpperCase()}`).value = selected.scale[axis].toFixed(2); }); const rounding = document.querySelector('#edgeRounding'); if (rounding) { rounding.value = selected.userData.rounding || 0; document.querySelector('#edgeRoundingValue').textContent = Number(rounding.value).toFixed(2); rounding.disabled = !selected.name.startsWith('Cube'); } const color = meshMaterials(selected)[0]?.color?.getHexString() || 'ffffff'; document.querySelector('#selectedDot').style.background = `#${color}`; syncMaterialInputs(selected); updateScaleHandles(); }
 function setEdgeRounding(value) { if (!selected || !selected.name.startsWith('Cube')) return; const rounding = Math.min(.7, Math.max(0, Number(value) || 0)); const oldGeometry = selected.geometry; selected.geometry = new RoundedBoxGeometry(1.55, 1.55, 1.55, 4, rounding); selected.geometry.computeVertexNormals(); selected.userData.rounding = rounding; oldGeometry.dispose(); discardSelectionOutline(); selectionOutline = new THREE.LineSegments(new THREE.EdgesGeometry(selected.geometry), new THREE.LineBasicMaterial({ color: 0xf26639, transparent: true, opacity: .95, depthTest: false })); selectionOutline.renderOrder = 10; selected.add(selectionOutline); document.querySelector('#edgeRoundingValue').textContent = rounding.toFixed(2); updateScaleHandles(); }
 function escapeListText(value) { return String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;'); }
 function updateList() {
@@ -1023,6 +1092,46 @@ renderer.domElement.addEventListener('pointerdown', event => {
   pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
   pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
   raycaster.setFromCamera(pointer, camera);
+  if (editorMode === 'sculpt') {
+    if (!selected) return;
+    const hit = raycaster.intersectObject(selected, false)[0];
+    if (!hit) return;
+    rememberScene();
+    const previousGeometry = selected.geometry;
+    selected.geometry = previousGeometry.clone();
+    previousGeometry.dispose();
+    importedSerialization.delete(selected);
+    selected.userData.modelrVertexEdited = true;
+    const brush = document.querySelector('#sculptBrush').value;
+    const strength = Number(document.querySelector('#sculptStrength').value);
+    const radius = Number(document.querySelector('#sculptRadius').value) /
+      Math.max(.001, Math.abs(selected.scale.x), Math.abs(selected.scale.y), Math.abs(selected.scale.z));
+    const center = selected.worldToLocal(hit.point.clone());
+    const direction = hit.face.normal.clone().normalize().toArray();
+    const basePositions = Float32Array.from(selected.geometry.attributes.position.array);
+    dragStart = {
+      kind: 'sculpt',
+      x: event.clientX,
+      y: event.clientY,
+      originWorld: hit.point.clone(),
+      center,
+      radius,
+      strength,
+      brush,
+      direction,
+      basePositions,
+      adjacency: brush === 'smooth' ? sculptAdjacency(selected.geometry) : [],
+      dabs: [],
+      changed: false
+    };
+    if (raycaster.ray.intersectPlane(grabPlane.setFromNormalAndCoplanarPoint(camera.getWorldDirection(new THREE.Vector3()), hit.point), grabPoint)) {
+      dragStart.dabs.push({ center, radius, strength, mode: brush, direction, delta: [0, 0, 0] });
+      applySculptDabs();
+      dragStart.changed = brush !== 'grab';
+    }
+    controls.enabled = false;
+    return;
+  }
   if (editorMode === 'edit') {
     if (!selected) return;
     selectedComponentPoints = [];
@@ -1095,7 +1204,7 @@ renderer.domElement.addEventListener('pointerdown', event => {
     controls.enabled = false;
     return;
   }
-  const hit = raycaster.intersectObjects(objects)[0];
+  const hit = raycaster.intersectObjects(objects, false)[0];
   if (hit) {
     selectObject(hit.object);
     rememberScene();
@@ -1126,6 +1235,30 @@ renderer.domElement.addEventListener('pointermove', event => {
     handle.scale.setScalar(objectScale);
   });
   if (!dragStart || !selected) return;
+  if (dragStart.kind === 'sculpt') {
+    if (!raycaster.ray.intersectPlane(grabPlane, grabPoint)) return;
+    const local = selected.worldToLocal(grabPoint.clone()).toArray();
+    const delta = local.map((value, axis) => value - dragStart.center[axis]);
+    if (dragStart.brush === 'grab') {
+      dragStart.dabs = [{
+        center: dragStart.center,
+        radius: dragStart.radius,
+        strength: dragStart.strength,
+        mode: 'grab',
+        direction: dragStart.direction,
+        delta
+      }];
+    } else if (!dragStart.dabs.length || Math.hypot(...local.map((value, axis) => value - dragStart.dabs.at(-1).center[axis])) > dragStart.radius * .12) {
+      if (dragStart.dabs.length < 24) {
+        dragStart.dabs.push({ center: local, radius: dragStart.radius, strength: dragStart.strength, mode: dragStart.brush, direction: dragStart.direction, delta: [0, 0, 0] });
+      }
+    }
+    if (dragStart.dabs.length) {
+      applySculptDabs();
+      dragStart.changed = true;
+    }
+    return;
+  }
   if (dragStart.kind === 'component') {
     if (!dragStart.changed && Math.hypot(event.clientX - dragStart.x, event.clientY - dragStart.y) < 2) return;
     if (!dragStart.changed) {
@@ -1209,6 +1342,13 @@ renderer.domElement.addEventListener('pointermove', event => {
   syncInputs();
 });
 window.addEventListener('pointerup', () => {
+  if (dragStart?.kind === 'sculpt' && dragStart.changed && selected) {
+    discardSelectionOutline();
+    selectionOutline = new THREE.LineSegments(new THREE.EdgesGeometry(selected.geometry), new THREE.LineBasicMaterial({ color: 0xf26639, transparent: true, opacity: .95, depthTest: false }));
+    selectionOutline.renderOrder = 10;
+    selected.add(selectionOutline);
+    updateList();
+  }
   if (dragStart?.kind === 'component' && dragStart.changed && selected) {
     discardSelectionOutline();
     selectionOutline = new THREE.LineSegments(new THREE.EdgesGeometry(selected.geometry), new THREE.LineBasicMaterial({ color: 0xf26639, transparent: true, opacity: .95, depthTest: false }));
@@ -1356,9 +1496,75 @@ document.querySelector('#timelineRuler').addEventListener('pointerdown', event =
 });
 window.addEventListener('keyup', event => cameraKeys.delete(String(event.key || '').toLowerCase()));
 window.addEventListener('blur', () => cameraKeys.clear());
-function applySelectedColor(value) { if (!selected || !/^#[0-9a-f]{6}$/i.test(value)) return; meshMaterials(selected).forEach(material => { if (material.color) material.color.set(value); material.needsUpdate = true; }); importedSerialization.delete(selected); document.querySelector('#colorValue').textContent = value.toUpperCase(); document.querySelector('#selectedDot').style.background = value; updateList(); }
+let materialEditOpen = false;
+function beginMaterialEdit() {
+  if (!selected || materialEditOpen) return;
+  rememberScene();
+  materialEditOpen = true;
+}
+function applySelectedColor(value) {
+  if (!selected || !/^#[0-9a-f]{6}$/i.test(value)) return;
+  meshMaterials(selected).forEach(material => {
+    if (material.color) material.color.set(value);
+    material.needsUpdate = true;
+  });
+  importedSerialization.delete(selected);
+  document.querySelector('#colorValue').textContent = value.toUpperCase();
+  document.querySelector('#selectedDot').style.background = value;
+  updateList();
+}
+const materialControls = ['colorPicker', 'roughness', 'metallic', 'emissionColor', 'emissionStrength', 'materialOpacity']
+  .map(id => document.querySelector(`#${id}`));
+materialControls.forEach(control => {
+  control.addEventListener('pointerdown', beginMaterialEdit);
+  control.addEventListener('keydown', event => {
+    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'PageUp', 'PageDown', 'Home', 'End'].includes(event.key)) beginMaterialEdit();
+  });
+  control.addEventListener('change', () => { materialEditOpen = false; });
+});
+window.addEventListener('pointerup', () => { materialEditOpen = false; });
 document.querySelector('#colorPicker').addEventListener('input', event => applySelectedColor(event.target.value));
 document.querySelector('#colorPicker').addEventListener('change', event => applySelectedColor(event.target.value));
+document.querySelector('#roughness').addEventListener('input', event => {
+  if (!selected) return;
+  const value = THREE.MathUtils.clamp(Number(event.target.value), 0, 1);
+  meshMaterials(selected).forEach(material => { material.roughness = value; });
+  document.querySelector('#roughnessValue').textContent = value.toFixed(2);
+  importedSerialization.delete(selected);
+});
+document.querySelector('#metallic').addEventListener('input', event => {
+  if (!selected) return;
+  const value = THREE.MathUtils.clamp(Number(event.target.value), 0, 1);
+  meshMaterials(selected).forEach(material => { material.metalness = value; });
+  document.querySelector('#metallicValue').textContent = value.toFixed(2);
+  importedSerialization.delete(selected);
+});
+document.querySelector('#emissionColor').addEventListener('input', event => {
+  const value = event.target.value;
+  if (!selected || !/^#[0-9a-f]{6}$/i.test(value)) return;
+  meshMaterials(selected).forEach(material => material.emissive?.set(value));
+  document.querySelector('#emissionColorValue').textContent = value.toUpperCase();
+  importedSerialization.delete(selected);
+});
+document.querySelector('#emissionStrength').addEventListener('input', event => {
+  if (!selected) return;
+  const value = THREE.MathUtils.clamp(Number(event.target.value), 0, 8);
+  meshMaterials(selected).forEach(material => { material.emissiveIntensity = value; });
+  document.querySelector('#emissionStrengthValue').textContent = value.toFixed(2);
+  importedSerialization.delete(selected);
+});
+document.querySelector('#materialOpacity').addEventListener('input', event => {
+  if (!selected) return;
+  const value = THREE.MathUtils.clamp(Number(event.target.value), .05, 1);
+  meshMaterials(selected).forEach(material => {
+    material.opacity = value;
+    material.transparent = value < 1;
+    material.depthWrite = value === 1;
+    material.needsUpdate = true;
+  });
+  document.querySelector('#materialOpacityValue').textContent = value.toFixed(2);
+  importedSerialization.delete(selected);
+});
 const partContext = document.querySelector('#partContext');
 let contextPart = null;
 document.querySelector('#partsList').addEventListener('contextmenu', event => { const row = event.target.closest('.part-row'); if (!row) return; event.preventDefault(); contextPart = objects.find(item => item.name === row.dataset.name); if (!contextPart) return; selectObject(contextPart); partContext.style.left = `${Math.min(event.clientX, window.innerWidth - 140)}px`; partContext.style.top = `${Math.min(event.clientY, window.innerHeight - 90)}px`; partContext.classList.add('open'); });
@@ -1366,7 +1572,6 @@ document.addEventListener('click', event => { if (!event.target.closest('#partCo
 document.querySelector('#renamePart').onclick = () => { if (!contextPart) return; const name = window.prompt('New name for this part:', contextPart.name); if (name?.trim()) { contextPart.name = name.trim(); selectObject(contextPart); updateList(); } partContext.classList.remove('open'); };
 document.querySelector('#duplicatePart').onclick = () => { if (!contextPart) return; selectObject(contextPart); duplicateSelected(true); contextPart = selected; partContext.classList.remove('open'); };
 document.querySelector('#deletePart').onclick = () => { if (!contextPart) return; rememberScene(); const index = objects.indexOf(contextPart); if (index >= 0) objects.splice(index, 1); scene.remove(contextPart); if (!objects.length) addObject('Cube', 0x999999, [0, .8, 0]); selectObject(objects[Math.max(0, index - 1)] || objects[0]); updateList(); contextPart = null; partContext.classList.remove('open'); };
-[['roughness','roughnessValue'],['metallic','metallicValue']].forEach(([id, output]) => document.querySelector(`#${id}`).addEventListener('input', event => { if (selected) { meshMaterials(selected).forEach(material => { material[id] = Number(event.target.value); }); importedSerialization.delete(selected); } document.querySelector(`#${output}`).textContent = Number(event.target.value).toFixed(2); }));
 
 function generatedCode() {
   const geometryCode = mesh => {
@@ -1377,7 +1582,7 @@ function generatedCode() {
     if (mesh.name.startsWith('Crown')) return "new THREE.ExtrudeGeometry(new THREE.Shape().setFromPoints([new THREE.Vector2(-.78, -.55), new THREE.Vector2(.78, -.55), new THREE.Vector2(.68, .45), new THREE.Vector2(.36, .05), new THREE.Vector2(0, .72), new THREE.Vector2(-.36, .05), new THREE.Vector2(-.68, .45)]), { depth: .48, bevelEnabled: true, bevelSegments: 2, bevelSize: .06, bevelThickness: .06 })";
     return `new RoundedBoxGeometry(1.55, 1.55, 1.55, 4, ${(mesh.userData.rounding || .04).toFixed(2)})`;
   };
-  return `// modelr scene\nimport * as THREE from 'three';\nimport { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';\n\nconst scene = new THREE.Scene();\n\n${objects.map(mesh => { const name = String(mesh.name || 'Object').toLowerCase().replace(/[^a-z0-9_$]/g, '_'); const rotation = mesh.rotation.toArray().slice(0, 3); return `const ${name} = new THREE.Mesh(\n  ${geometryCode(mesh)},\n  new THREE.MeshStandardMaterial({ color: '#${mesh.material.color.getHexString()}', roughness: ${mesh.material.roughness.toFixed(2)}, metalness: ${mesh.material.metalness.toFixed(2)} })\n);\n${name}.position.set(${mesh.position.toArray().map(value => value.toFixed(3)).join(', ')});\n${name}.rotation.set(${rotation.map(value => value.toFixed(3)).join(', ')});\n${name}.scale.set(${mesh.scale.toArray().map(value => value.toFixed(3)).join(', ')});\nscene.add(${name});`; }).join('\n\n')}`;
+  return `// modelr scene\nimport * as THREE from 'three';\nimport { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';\n\nconst scene = new THREE.Scene();\n\n${objects.map(mesh => { const name = String(mesh.name || 'Object').toLowerCase().replace(/[^a-z0-9_$]/g, '_'); const rotation = mesh.rotation.toArray().slice(0, 3); const material = meshMaterials(mesh)[0]; return `const ${name} = new THREE.Mesh(\n  ${geometryCode(mesh)},\n  new THREE.MeshStandardMaterial({ color: '#${material.color?.getHexString() || 'ffffff'}', roughness: ${(material.roughness ?? .5).toFixed(2)}, metalness: ${(material.metalness ?? 0).toFixed(2)}, emissive: '#${material.emissive?.getHexString() || '000000'}', emissiveIntensity: ${(material.emissiveIntensity ?? 0).toFixed(2)}, opacity: ${(material.opacity ?? 1).toFixed(2)}, transparent: ${Boolean(material.transparent)} })\n);\n${name}.position.set(${mesh.position.toArray().map(value => value.toFixed(3)).join(', ')});\n${name}.rotation.set(${rotation.map(value => value.toFixed(3)).join(', ')});\n${name}.scale.set(${mesh.scale.toArray().map(value => value.toFixed(3)).join(', ')});\nscene.add(${name});`; }).join('\n\n')}`;
 }
 document.querySelector('#codeButton').onclick = () => { document.querySelector('#generatedCode').value = generatedCode(); document.querySelector('#codeStatus').textContent = ''; document.querySelector('#codeModal').classList.add('open'); };
 document.querySelector('#closeModal').onclick = () => document.querySelector('#codeModal').classList.remove('open');

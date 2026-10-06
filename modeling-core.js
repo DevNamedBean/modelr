@@ -162,3 +162,72 @@ export function bevelEdge(triangles, edgeA, edgeB, width) {
   });
   return { triangles: result, selectedIndex };
 }
+
+function smoothFalloff(distance, radius) {
+  const amount = Math.max(0, 1 - distance / radius);
+  return amount * amount * (3 - 2 * amount);
+}
+
+export function sculptStroke(vertices, adjacency, dabs) {
+  if (!Array.isArray(vertices) || !Array.isArray(adjacency) || !Array.isArray(dabs)) {
+    throw new TypeError('Sculpt requires vertex, adjacency, and dab arrays.');
+  }
+  if (dabs.some(dab => !dab || typeof dab !== 'object')) {
+    throw new TypeError('Each sculpt dab must be an object.');
+  }
+  const result = vertices.map(vertex => {
+    if (!Array.isArray(vertex) || vertex.length !== 3 || !vertex.every(Number.isFinite)) {
+      throw new TypeError('Sculpt vertices must contain finite 3D positions.');
+    }
+    return [...vertex];
+  });
+  if (dabs.some(dab => dab.mode === 'smooth')) {
+    if (adjacency.length !== vertices.length) {
+      throw new TypeError('Smooth sculpting requires one adjacency list per vertex.');
+    }
+    if (adjacency.some(links =>
+      !Array.isArray(links) || links.some(index => !Number.isInteger(index) || index < 0 || index >= vertices.length))) {
+      throw new TypeError('Sculpt adjacency contains an invalid vertex reference.');
+    }
+  }
+  for (const dab of dabs) {
+    const { center, radius, strength, mode, direction = [0, 0, 1], delta = [0, 0, 0] } = dab;
+    if (!Array.isArray(center) || center.length !== 3 || !center.every(Number.isFinite) ||
+      !Array.isArray(direction) || direction.length !== 3 || !direction.every(Number.isFinite) ||
+      !Array.isArray(delta) || delta.length !== 3 || !delta.every(Number.isFinite)) {
+      throw new TypeError('Sculpt center, direction, and drag delta must be finite 3D vectors.');
+    }
+    if (!Number.isFinite(radius) || radius <= 0 || !Number.isFinite(strength) || strength < 0 || strength > 1) {
+      throw new RangeError('Sculpt radius must be positive and strength must be between zero and one.');
+    }
+    if (!['draw', 'inflate', 'crease', 'grab', 'smooth'].includes(mode)) {
+      throw new RangeError('Unsupported sculpt brush.');
+    }
+    const source = mode === 'smooth' ? result.map(vertex => [...vertex]) : result;
+    for (let index = 0; index < result.length; index++) {
+      const vertex = source[index];
+      const distance = Math.hypot(vertex[0] - center[0], vertex[1] - center[1], vertex[2] - center[2]);
+      if (distance >= radius) continue;
+      const weight = smoothFalloff(distance, radius) * strength;
+      if (mode === 'grab') {
+        result[index] = vertex.map((value, axis) => value + delta[axis] * weight);
+      } else if (mode === 'smooth') {
+        const neighbors = adjacency[index];
+        if (!neighbors.length) continue;
+        const average = [0, 0, 0];
+        neighbors.forEach(neighborIndex => {
+          for (let axis = 0; axis < 3; axis++) average[axis] += source[neighborIndex][axis] / neighbors.length;
+        });
+        result[index] = vertex.map((value, axis) => value + (average[axis] - value) * weight);
+      } else {
+        const amount = radius * weight * .25 * (mode === 'crease' ? -1 : 1);
+        result[index] = vertex.map((value, axis) => value + direction[axis] * amount);
+      }
+    }
+  }
+  return result;
+}
+
+export function sculptVertices(vertices, adjacency, center, radius, strength, mode, direction = [0, 0, 1], delta = [0, 0, 0]) {
+  return sculptStroke(vertices, adjacency, [{ center, radius, strength, mode, direction, delta }]);
+}
