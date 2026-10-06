@@ -691,7 +691,7 @@ function addUserObject(type, color, position) {
   candidate.material.dispose();
   if (exceedsTriangleLimit) { sceneLimitNotice(`This scene is limited to ${MAX_SCENE_TRIANGLES.toLocaleString()} triangles to keep the editor responsive.`); return; }
   rememberScene();
-  if (addObject(type, color, position)) saveAddedPartAutomatically();
+  if (addObject(type, color, position)) saveSceneAutomatically();
 }
 function restoreScene(snapshot) {
   stopPlayback();
@@ -767,7 +767,7 @@ function restoreScene(snapshot) {
   updateTimeline();
   updateList();
 }
-function duplicateSelected(exactPosition = false) { if (!selected) return; if (objects.length >= MAX_SCENE_OBJECTS || sceneTriangleCount() + triangleCount(selected) > MAX_SCENE_TRIANGLES) { sceneLimitNotice('This duplicate would exceed the scene performance limits.'); return; } rememberScene(); const duplicate = new THREE.Mesh(selected.geometry.clone(), Array.isArray(selected.material) ? selected.material.map(material => material.clone()) : selected.material.clone()); duplicate.name = `${selected.name} Copy ${objectIndex++}`; duplicate.position.copy(selected.position); if (!exactPosition) duplicate.position.add(new THREE.Vector3(.6, 0, .6)); duplicate.scale.copy(selected.scale); duplicate.rotation.copy(selected.rotation); duplicate.userData = { ...selected.userData, modelrAnimationId: `animation-${Date.now()}-${objectIndex}`, modelrKeyframes: (selected.userData.modelrKeyframes || []).map(keyframe => ({ ...keyframe, position: [...keyframe.position], rotation: [...keyframe.rotation], scale: [...keyframe.scale] })) }; duplicate.castShadow = selected.castShadow; duplicate.receiveShadow = selected.receiveShadow; scene.add(duplicate); objects.push(duplicate); selectObject(duplicate); updateTimeline(); updateList(); saveAddedPartAutomatically(); }
+function duplicateSelected(exactPosition = false) { if (!selected) return; if (objects.length >= MAX_SCENE_OBJECTS || sceneTriangleCount() + triangleCount(selected) > MAX_SCENE_TRIANGLES) { sceneLimitNotice('This duplicate would exceed the scene performance limits.'); return; } rememberScene(); const duplicate = new THREE.Mesh(selected.geometry.clone(), Array.isArray(selected.material) ? selected.material.map(material => material.clone()) : selected.material.clone()); duplicate.name = `${selected.name} Copy ${objectIndex++}`; duplicate.position.copy(selected.position); if (!exactPosition) duplicate.position.add(new THREE.Vector3(.6, 0, .6)); duplicate.scale.copy(selected.scale); duplicate.rotation.copy(selected.rotation); duplicate.userData = { ...selected.userData, modelrAnimationId: `animation-${Date.now()}-${objectIndex}`, modelrKeyframes: (selected.userData.modelrKeyframes || []).map(keyframe => ({ ...keyframe, position: [...keyframe.position], rotation: [...keyframe.rotation], scale: [...keyframe.scale] })) }; duplicate.castShadow = selected.castShadow; duplicate.receiveShadow = selected.receiveShadow; scene.add(duplicate); objects.push(duplicate); selectObject(duplicate); updateTimeline(); updateList(); saveSceneAutomatically(); }
 function undo() { if (!undoStack.length) return; redoStack.push(sceneSnapshot()); restoreScene(undoStack.pop()); }
 function redo() { if (!redoStack.length) return; undoStack.push(sceneSnapshot()); restoreScene(redoStack.pop()); }
 
@@ -1013,7 +1013,7 @@ function setEditorMode(mode) {
 }
 function selectObject(mesh) { if (!mesh) return; clearVertexOverlay(); discardSelectionOutline(); selected = mesh; selectedVertexIndex = null; selectedComponentPoints = []; keyframesFor(mesh); selectionOutline = new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry), new THREE.LineBasicMaterial({ color: 0xf26639, transparent: true, opacity: .95, depthTest: false })); selectionOutline.renderOrder = 10; mesh.add(selectionOutline); document.querySelector('#selectionLabel').textContent = mesh.name; document.querySelector('#propertyName').textContent = mesh.name; document.querySelector('#propertyType').textContent = 'MESH'; syncMaterialInputs(mesh); syncInputs(); updateVertexOverlay(); updateTimeline(); updateList(); if (document.querySelector('#animationWorkspace')?.classList.contains('open')) updateAnimationWorkspace(); }
 function clearSelection() { clearVertexOverlay(); discardSelectionOutline(); selected = null; selectedVertexIndex = null; document.querySelector('#selectionLabel').textContent = 'No selection'; updateScaleHandles(); updateTimeline(); updateList(); if (document.querySelector('#animationWorkspace')?.classList.contains('open')) updateAnimationWorkspace(); }
-function syncInputs() { if (!selected) return; ['x','y','z'].forEach(axis => { document.querySelector(`#pos${axis.toUpperCase()}`).value = selected.position[axis].toFixed(2); document.querySelector(`#scale${axis.toUpperCase()}`).value = selected.scale[axis].toFixed(2); }); const rounding = document.querySelector('#edgeRounding'); if (rounding) { rounding.value = selected.userData.rounding || 0; document.querySelector('#edgeRoundingValue').textContent = Number(rounding.value).toFixed(2); rounding.disabled = !selected.name.startsWith('Cube'); } const color = meshMaterials(selected)[0]?.color?.getHexString() || 'ffffff'; document.querySelector('#selectedDot').style.background = `#${color}`; syncMaterialInputs(selected); updateScaleHandles(); }
+function syncInputs() { if (!selected) return; ['x','y','z'].forEach(axis => { document.querySelector(`#pos${axis.toUpperCase()}`).value = selected.position[axis].toFixed(2); document.querySelector(`#scale${axis.toUpperCase()}`).value = selected.scale[axis].toFixed(2); }); const scales = selected.scale.toArray(); const uniformScale = document.querySelector('#uniformScale'); const scaleValue = document.querySelector('#uniformScaleValue'); uniformScale.value = String(THREE.MathUtils.clamp(Math.cbrt(scales[0] * scales[1] * scales[2]), Number(uniformScale.min), Number(uniformScale.max))); scaleValue.textContent = scales.every(value => Math.abs(value - scales[0]) < .001) ? scales[0].toFixed(2) : 'varies'; const rounding = document.querySelector('#edgeRounding'); if (rounding) { rounding.value = selected.userData.rounding || 0; document.querySelector('#edgeRoundingValue').textContent = Number(rounding.value).toFixed(2); rounding.disabled = !selected.name.startsWith('Cube'); } const color = meshMaterials(selected)[0]?.color?.getHexString() || 'ffffff'; document.querySelector('#selectedDot').style.background = `#${color}`; syncMaterialInputs(selected); updateScaleHandles(); }
 function setEdgeRounding(value) { if (!selected || !selected.name.startsWith('Cube')) return; const rounding = Math.min(.7, Math.max(0, Number(value) || 0)); const oldGeometry = selected.geometry; selected.geometry = new RoundedBoxGeometry(1.55, 1.55, 1.55, 4, rounding); selected.geometry.computeVertexNormals(); selected.userData.rounding = rounding; oldGeometry.dispose(); discardSelectionOutline(); selectionOutline = new THREE.LineSegments(new THREE.EdgesGeometry(selected.geometry), new THREE.LineBasicMaterial({ color: 0xf26639, transparent: true, opacity: .95, depthTest: false })); selectionOutline.renderOrder = 10; selected.add(selectionOutline); document.querySelector('#edgeRoundingValue').textContent = rounding.toFixed(2); updateScaleHandles(); }
 function escapeListText(value) { return String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;'); }
 function updateList() {
@@ -1069,6 +1069,36 @@ document.querySelector('#addCone').onclick = () => addUserObject('Cone', 0xc56b4
 document.querySelector('#addCrown').onclick = () => addUserObject('Crown', 0xd6a843, [Math.random() * 3 - 1.5, .9, Math.random() * 2 - 1]);
 document.querySelector('#edgeRounding').addEventListener('input', event => { rememberScene(); setEdgeRounding(event.target.value); });
 ['posX','posY','posZ','scaleX','scaleY','scaleZ'].forEach(id => document.querySelector(`#${id}`).addEventListener('input', event => { if (!selected) return; const prop = id.startsWith('pos') ? 'position' : 'scale'; const axis = id.slice(-1).toLowerCase(); selected[prop][axis] = Number(event.target.value); }));
+const uniformScaleInput = document.querySelector('#uniformScale');
+let uniformScaleEditOpen = false;
+let uniformScaleChanged = false;
+function beginUniformScaleEdit() {
+  if (!selected || uniformScaleEditOpen) return;
+  rememberScene();
+  uniformScaleEditOpen = true;
+  uniformScaleChanged = false;
+}
+function finishUniformScaleEdit() {
+  if (!uniformScaleEditOpen) return;
+  uniformScaleEditOpen = false;
+  if (uniformScaleChanged) saveSceneAutomatically();
+  uniformScaleChanged = false;
+}
+uniformScaleInput.addEventListener('pointerdown', beginUniformScaleEdit);
+uniformScaleInput.addEventListener('keydown', event => {
+  if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'PageUp', 'PageDown', 'Home', 'End'].includes(event.key)) beginUniformScaleEdit();
+});
+uniformScaleInput.addEventListener('input', event => {
+  if (!selected) return;
+  if (!uniformScaleEditOpen) beginUniformScaleEdit();
+  const amount = Math.max(.1, Number(event.target.value));
+  selected.scale.setScalar(amount);
+  uniformScaleChanged = true;
+  syncInputs();
+});
+uniformScaleInput.addEventListener('change', finishUniformScaleEdit);
+uniformScaleInput.addEventListener('keyup', finishUniformScaleEdit);
+window.addEventListener('pointerup', finishUniformScaleEdit);
 
 const raycaster = new THREE.Raycaster();
 raycaster.params.Line.threshold = .18;
@@ -1634,7 +1664,7 @@ document.querySelector('#applyCode').onclick = () => {
   }
   rememberScene();
   restoreScene(parsed.map(item => ({ ...item, name: item.name })));
-  saveAddedPartAutomatically();
+  saveSceneAutomatically();
   document.querySelector('#codeStatus').textContent = 'Scene applied.';
 };
 
@@ -1795,9 +1825,9 @@ async function autoSaveScene() {
   localStorage.setItem('modelrProjectName', currentProjectName);
   document.querySelector('#projectName').textContent = currentProjectName;
 }
-function saveAddedPartAutomatically() {
+function saveSceneAutomatically() {
   void autoSaveScene().catch(error => {
-    console.error('Automatic save after adding a part failed.', error);
+    console.error('Automatic scene save failed.', error);
     window.alert(`Could not automatically save this scene: ${error.message}`);
   });
 }
@@ -1890,7 +1920,7 @@ modelImportInput.addEventListener('change', async event => {
     imported.forEach(mesh => { scene.add(mesh); objects.push(mesh); });
     selectObject(imported[0]);
     updateList();
-    saveAddedPartAutomatically();
+    saveSceneAutomatically();
   } catch (error) {
     window.alert(`Could not import model: ${error.message || error}`);
   } finally {
