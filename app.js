@@ -11,6 +11,7 @@ const objects = [];
 const undoStack = [];
 const redoStack = [];
 const importedSerialization = new WeakMap();
+const originalImageMaterials = new WeakMap();
 const collapsedModelFolders = new Set();
 const MAX_SCENE_OBJECTS = 300;
 const MAX_SCENE_TRIANGLES = 250000;
@@ -18,6 +19,8 @@ const MAX_IMPORT_FILE_BYTES = 50 * 1024 * 1024;
 const MAX_IMPORT_ARCHIVE_BYTES = 64 * 1024 * 1024;
 const MAX_IMPORT_ARCHIVE_ENTRIES = 200;
 const MAX_REQUEST_BODY_CHARS = 20 * 1024 * 1024;
+const MAX_IMAGE_FILE_BYTES = 20 * 1024 * 1024;
+const MAX_IMAGE_DATA_URL_CHARS = 2_500_000;
 const DEFAULT_END_FRAME = 120;
 const FRAME_RATE = 24;
 let selected = null;
@@ -62,6 +65,10 @@ try {
     render() { context.fillStyle = '#202020'; context.fillRect(0, 0, canvas.width, canvas.height); }
   };
 }
+function isImageTextureData(value) {
+  return typeof value === 'string' && value.length <= MAX_IMAGE_DATA_URL_CHARS &&
+    /^data:image\/(?:webp|png|jpeg);base64,[a-z0-9+/]+={0,2}$/i.test(value);
+}
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.shadowMap.enabled = true;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -82,6 +89,7 @@ const floor = new THREE.Mesh(new THREE.PlaneGeometry(20, 20), new THREE.MeshStan
 floor.rotation.x = -Math.PI / 2; floor.position.y = -.02; floor.receiveShadow = true; scene.add(floor);
 const grid = new THREE.GridHelper(20, 20, 0x465047, 0x2b302c); grid.position.y = .01; scene.add(grid);
 const scaleHandles = [];
+let uniformScaleHandle;
 const rotateHandles = [];
 const moveHandles = [];
 ['x', 'y', 'z'].forEach(axis => [-1, 1].forEach(sign => {
@@ -91,6 +99,13 @@ const moveHandles = [];
   scene.add(handle);
   scaleHandles.push(handle);
 }));
+uniformScaleHandle = new THREE.Mesh(
+  new THREE.SphereGeometry(.2, 20, 14),
+  new THREE.MeshStandardMaterial({ color: 0xf2c14e, emissive: 0x5c4310, emissiveIntensity: .5 })
+);
+uniformScaleHandle.userData = { scaleHandle: true, uniform: true };
+uniformScaleHandle.visible = false;
+scene.add(uniformScaleHandle);
 [['x', 0xe05d5d, new THREE.Euler(0, Math.PI / 2, 0)], ['y', 0x72c987, new THREE.Euler(Math.PI / 2, 0, 0)], ['z', 0x5b91d8, new THREE.Euler(0, 0, 0)]].forEach(([axis, color, rotation]) => {
   const rotateHandle = new THREE.Mesh(new THREE.TorusGeometry(1.35, .06, 12, 96), new THREE.MeshBasicMaterial({ color, transparent: true, opacity: .42, depthTest: false }));
   rotateHandle.userData = { rotateHandle: true, axis };
@@ -129,6 +144,63 @@ function sceneTriangleCount() { return objects.reduce((total, mesh) => total + t
 function sceneLimitNotice(message) { window.alert(message); }
 function addObject(type, color = 0x999999, position = [0, .8, 0]) { if (objects.length >= MAX_SCENE_OBJECTS) { sceneLimitNotice(`This scene is limited to ${MAX_SCENE_OBJECTS} objects to keep the editor responsive.`); return null; } const mesh = makeMesh(type, color); if (sceneTriangleCount() + triangleCount(mesh) > MAX_SCENE_TRIANGLES) { mesh.geometry.dispose(); mesh.material.dispose(); sceneLimitNotice(`This scene is limited to ${MAX_SCENE_TRIANGLES.toLocaleString()} triangles to keep the editor responsive.`); return null; } mesh.position.set(...position); mesh.name = `${type} ${objectIndex++}`; scene.add(mesh); objects.push(mesh); selectObject(mesh); updateList(); return mesh; }
 function meshMaterials(mesh) { return (Array.isArray(mesh.material) ? mesh.material : [mesh.material]).filter(Boolean); }
+function updateImageTextureControls(mesh) {
+  const name = mesh?.userData.modelrImageTextureName || '';
+  document.querySelector('#imageTextureName').textContent = name || (mesh?.userData.modelrImageTexture ? 'Image texture applied' : 'No image');
+  document.querySelector('#removeImageTextureButton').disabled = !mesh?.userData.modelrImageTexture;
+}
+function loadImageTexture(dataUrl) {
+  return new Promise((resolve, reject) => {
+    new THREE.TextureLoader().load(dataUrl, texture => {
+      texture.colorSpace = THREE.SRGBColorSpace;
+      texture.needsUpdate = true;
+      resolve(texture);
+    }, undefined, () => reject(new Error('Could not decode the image texture.')));
+  });
+}
+function applyImageTexture(mesh, texture, dataUrl, name = '') {
+  meshMaterials(mesh).forEach(material => {
+    if (!originalImageMaterials.has(material)) {
+      originalImageMaterials.set(material, {
+        map: material.map,
+        transparent: material.transparent,
+        depthWrite: material.depthWrite
+      });
+    }
+    const oldTexture = material.map;
+    material.map = texture;
+    material.transparent = true;
+    material.depthWrite = false;
+    material.needsUpdate = true;
+    if (oldTexture && oldTexture !== originalImageMaterials.get(material).map) oldTexture.dispose();
+  });
+  mesh.userData.modelrImageTexture = dataUrl;
+  mesh.userData.modelrImageTextureName = name;
+  updateImageTextureControls(mesh);
+}
+async function restoreImageTexture(mesh, dataUrl) {
+  const texture = await loadImageTexture(dataUrl);
+  if (!objects.includes(mesh)) {
+    texture.dispose();
+    return;
+  }
+  applyImageTexture(mesh, texture, dataUrl, mesh.userData.modelrImageTextureName || '');
+}
+function removeImageTexture(mesh) {
+  meshMaterials(mesh).forEach(material => {
+    const oldTexture = material.map;
+    const original = originalImageMaterials.get(material);
+    material.map = original?.map || null;
+    material.transparent = original?.transparent ?? material.opacity < 1;
+    material.depthWrite = original?.depthWrite ?? material.opacity === 1;
+    material.needsUpdate = true;
+    originalImageMaterials.delete(material);
+    if (oldTexture && oldTexture !== material.map) oldTexture.dispose();
+  });
+  delete mesh.userData.modelrImageTexture;
+  delete mesh.userData.modelrImageTextureName;
+  updateImageTextureControls(mesh);
+}
 function syncMaterialInputs(mesh) {
   const material = meshMaterials(mesh)[0];
   if (!material) return;
@@ -146,6 +218,7 @@ function syncMaterialInputs(mesh) {
   document.querySelector('#emissionStrengthValue').textContent = Number(material.emissiveIntensity ?? 0).toFixed(2);
   document.querySelector('#materialOpacity').value = material.opacity ?? 1;
   document.querySelector('#materialOpacityValue').textContent = Number(material.opacity ?? 1).toFixed(2);
+  updateImageTextureControls(mesh);
 }
 function restoreImportedMesh(item) { const mesh = new THREE.ObjectLoader().parse(item.serialized); mesh.name = item.name || mesh.name; if (item.position) mesh.position.fromArray(item.position); if (item.rotation) mesh.rotation.fromArray(item.rotation); if (item.scale) mesh.scale.fromArray(item.scale); mesh.userData.modelrImported = true; mesh.userData.modelrGroupId ||= 'legacy-imported'; mesh.userData.modelrGroupName ||= 'Imported model'; importedSerialization.set(mesh, item.serialized); scene.add(mesh); objects.push(mesh); return mesh; }
 addObject('Cube', 0x999999, [0, .8, 0]).name = 'Cube 1';
@@ -548,13 +621,21 @@ function updateTimeline() {
   });
   document.querySelector('#timelineEndLabel').textContent = String(endFrame);
   const hasKey = keys.some(keyframe => keyframe.frame === Math.round(currentFrame));
+  const previousKeyframeButton = document.querySelector('#previousKeyframeButton');
+  const nextKeyframeButton = document.querySelector('#nextKeyframeButton');
+  previousKeyframeButton.disabled = !keys.some(keyframe => keyframe.frame < currentFrame);
+  nextKeyframeButton.disabled = !keys.some(keyframe => keyframe.frame > currentFrame);
   document.querySelector('#addKeyframeButton').disabled = !selected;
   document.querySelector('#deleteKeyframeButton').disabled = !hasKey;
   document.querySelector('#addKeyframeButton').classList.toggle('has-key', hasKey);
   document.querySelector('#loopPlaybackInput').checked = loopPlayback;
+  const autoKey = document.querySelector('#autoKeyInput').checked;
+  document.querySelector('#keyframeStatus').textContent = selected
+    ? `${selected.name} · Frame ${Math.round(currentFrame)} · ${hasKey ? 'key set' : 'no key'} · Auto-key ${autoKey ? 'on' : 'off'}`
+    : 'Select a part to animate';
   const currentKey = keys.find(keyframe => keyframe.frame === Math.round(currentFrame));
   document.querySelector('#interpolationSelect').disabled = !currentKey;
-  document.querySelector('#interpolationSelect').value = currentKey?.interpolation || 'linear';
+  document.querySelector('#interpolationSelect').value = currentKey?.interpolation || 'ease';
 }
 function setCurrentFrame(frame, apply = true) {
   currentFrame = THREE.MathUtils.clamp(Number(frame) || 0, 0, endFrame);
@@ -568,7 +649,7 @@ function captureKeyframe(mesh, frame = Math.round(currentFrame)) {
     rotation: [mesh.rotation.x, mesh.rotation.y, mesh.rotation.z],
     scale: mesh.scale.toArray(),
     color: `#${meshMaterials(mesh)[0]?.color?.getHexString() || 'ffffff'}`,
-    interpolation: document.querySelector('#interpolationSelect').value || 'linear',
+    interpolation: document.querySelector('#interpolationSelect').value || 'ease',
     shapeWeights: (mesh.userData.modelrShapeKeys || []).map(key => key.value || 0)
   };
   const keyframes = keyframesFor(mesh);
@@ -577,6 +658,11 @@ function captureKeyframe(mesh, frame = Math.round(currentFrame)) {
   else keyframes.push(keyframe);
   keyframes.sort((a, b) => a.frame - b.frame);
 }
+function commitAutoKeyframe(mesh = selected) {
+  if (!mesh || !document.querySelector('#autoKeyInput').checked) return;
+  captureKeyframe(mesh);
+  updateTimeline();
+}
 function insertKeyframe() {
   if (!selected) return;
   stopPlayback();
@@ -584,6 +670,7 @@ function insertKeyframe() {
   rememberScene();
   captureKeyframe(selected);
   updateTimeline();
+  saveSceneAutomatically();
 }
 function deleteKeyframe() {
   if (!selected) return;
@@ -597,6 +684,15 @@ function deleteKeyframe() {
   keyframes.splice(index, 1);
   applyAnimationFrame(currentFrame);
   updateTimeline();
+  saveSceneAutomatically();
+}
+function navigateKeyframe(direction) {
+  if (!selected) return;
+  const keys = keyframesFor(selected).slice().sort((a, b) => a.frame - b.frame);
+  const keyframe = direction < 0
+    ? keys.filter(item => item.frame < currentFrame).at(-1)
+    : keys.find(item => item.frame > currentFrame);
+  if (keyframe) setCurrentFrame(keyframe.frame);
 }
 function beginKeyframeDrag(event, marker) {
   if (event.button !== 0 || !selected) return;
@@ -629,7 +725,10 @@ function beginKeyframeDrag(event, marker) {
   const finish = () => {
     window.removeEventListener('pointermove', move);
     window.removeEventListener('pointerup', finish);
-    if (moved) updateTimeline();
+    if (moved) {
+      updateTimeline();
+      saveSceneAutomatically();
+    }
   };
   window.addEventListener('pointermove', move);
   window.addEventListener('pointerup', finish);
@@ -681,7 +780,7 @@ function serializedTriangleCount(item) {
   const vertexCount = position?.count || (position?.array?.length / (position?.itemSize || 3));
   return Math.floor((indexCount || vertexCount || 0) / 3);
 }
-function sceneSnapshot() { return objects.map(mesh => { const material = meshMaterials(mesh)[0]; const snapshot = { name: mesh.name, type: mesh.name.startsWith('Sphere') ? 'Sphere' : mesh.name.startsWith('Cylinder') ? 'Cylinder' : mesh.name.startsWith('Torus') ? 'Torus' : mesh.name.startsWith('Cone') ? 'Cone' : mesh.name.startsWith('Crown') ? 'Crown' : 'Cube', color: material?.color?.getHexString() || '999999', roughness: material?.roughness, metalness: material?.metalness, emissive: material?.emissive?.getHexString(), emissiveIntensity: material?.emissiveIntensity, opacity: material?.opacity, transparent: material?.transparent, position: mesh.position.toArray(), scale: mesh.scale.toArray(), rotation: mesh.rotation.toArray(), rounding: mesh.userData.rounding || 0, visible: mesh.visible, animationId: mesh.userData.modelrAnimationId, keyframes: (mesh.userData.modelrKeyframes || []).map(keyframe => ({ ...keyframe, position: [...keyframe.position], rotation: [...keyframe.rotation], scale: [...keyframe.scale], shapeWeights: [...(keyframe.shapeWeights || [])] })), actions: structuredClone(mesh.userData.modelrActions || []), nlaStrips: structuredClone(mesh.userData.modelrNlaStrips || []), drivers: structuredClone(mesh.userData.modelrDrivers || []), shapeBasis: mesh.userData.modelrShapeBasis ? [...mesh.userData.modelrShapeBasis] : null, shapeKeys: structuredClone(mesh.userData.modelrShapeKeys || []), timelineFrame: currentFrame, timelineEnd: endFrame, loopPlayback }; if (mesh.userData.modelrImported) { snapshot.type = 'Imported'; snapshot.serialized = importedMeshSnapshot(mesh); } else if (mesh.userData.modelrVertexEdited) { snapshot.geometry = mesh.geometry.toJSON(); } return snapshot; }); }
+function sceneSnapshot() { return objects.map(mesh => { const material = meshMaterials(mesh)[0]; const snapshot = { name: mesh.name, type: mesh.name.startsWith('Sphere') ? 'Sphere' : mesh.name.startsWith('Cylinder') ? 'Cylinder' : mesh.name.startsWith('Torus') ? 'Torus' : mesh.name.startsWith('Cone') ? 'Cone' : mesh.name.startsWith('Crown') ? 'Crown' : 'Cube', color: material?.color?.getHexString() || '999999', roughness: material?.roughness, metalness: material?.metalness, emissive: material?.emissive?.getHexString(), emissiveIntensity: material?.emissiveIntensity, opacity: material?.opacity, transparent: material?.transparent, imageTexture: mesh.userData.modelrImageTexture || null, imageTextureName: mesh.userData.modelrImageTextureName || '', position: mesh.position.toArray(), scale: mesh.scale.toArray(), rotation: mesh.rotation.toArray(), rounding: mesh.userData.rounding || 0, visible: mesh.visible, animationId: mesh.userData.modelrAnimationId, keyframes: (mesh.userData.modelrKeyframes || []).map(keyframe => ({ ...keyframe, position: [...keyframe.position], rotation: [...keyframe.rotation], scale: [...keyframe.scale], shapeWeights: [...(keyframe.shapeWeights || [])] })), actions: structuredClone(mesh.userData.modelrActions || []), nlaStrips: structuredClone(mesh.userData.modelrNlaStrips || []), drivers: structuredClone(mesh.userData.modelrDrivers || []), shapeBasis: mesh.userData.modelrShapeBasis ? [...mesh.userData.modelrShapeBasis] : null, shapeKeys: structuredClone(mesh.userData.modelrShapeKeys || []), timelineFrame: currentFrame, timelineEnd: endFrame, loopPlayback }; if (mesh.userData.modelrImported) { snapshot.type = 'Imported'; snapshot.serialized = importedMeshSnapshot(mesh); } else if (mesh.userData.modelrVertexEdited) { snapshot.geometry = mesh.geometry.toJSON(); } return snapshot; }); }
 function rememberScene() { undoStack.push(sceneSnapshot()); if (undoStack.length > 50) undoStack.shift(); redoStack.length = 0; }
 function addUserObject(type, color, position) {
   if (objects.length >= MAX_SCENE_OBJECTS) { sceneLimitNotice(`This scene is limited to ${MAX_SCENE_OBJECTS} objects to keep the editor responsive.`); return; }
@@ -700,7 +799,7 @@ function restoreScene(snapshot) {
   loopPlayback = false;
   clearVertexOverlay();
   discardSelectionOutline();
-  objects.forEach(mesh => { scene.remove(mesh); mesh.geometry.dispose(); meshMaterials(mesh).forEach(material => { for (const value of Object.values(material)) if (value?.isTexture) value.dispose(); material.dispose(); }); });
+  objects.forEach(mesh => { scene.remove(mesh); mesh.geometry.dispose(); meshMaterials(mesh).forEach(material => { const original = originalImageMaterials.get(material); if (original?.map && original.map !== material.map) original.map.dispose(); originalImageMaterials.delete(material); for (const value of Object.values(material)) if (value?.isTexture) value.dispose(); material.dispose(); }); });
   objects.length = 0;
   let restoredTriangles = 0;
   let skippedObjects = snapshot.length > MAX_SCENE_OBJECTS;
@@ -756,9 +855,18 @@ function restoreScene(snapshot) {
     const meshTriangles = triangleCount(mesh);
     if (restoredTriangles + meshTriangles > MAX_SCENE_TRIANGLES) { mesh.geometry.dispose(); meshMaterials(mesh).forEach(material => material.dispose()); skippedObjects = true; return; }
     if (item.serialized) { mesh.userData.modelrImported = true; importedSerialization.set(mesh, item.serialized); }
+    if (isImageTextureData(item.imageTexture)) {
+      mesh.userData.modelrImageTexture = item.imageTexture;
+      mesh.userData.modelrImageTextureName = typeof item.imageTextureName === 'string' ? item.imageTextureName.slice(0, 120) : '';
+    }
     restoredTriangles += meshTriangles;
     scene.add(mesh);
     objects.push(mesh);
+    if (mesh.userData.modelrImageTexture) {
+      restoreImageTexture(mesh, mesh.userData.modelrImageTexture).catch(error => {
+        console.error(`Could not restore image texture for ${mesh.name}.`, error);
+      });
+    }
   });
   if (!objects.length) { const mesh = makeMesh('Cube', 0x999999); mesh.position.set(0, .8, 0); mesh.name = 'Cube 1'; scene.add(mesh); objects.push(mesh); }
   if (skippedObjects) sceneLimitNotice('Some objects were left out because the scene exceeds the editor performance limits.');
@@ -785,6 +893,8 @@ function updateScaleHandles() {
     localPosition[handle.userData.axis] = (halfSize[handle.userData.axis] * selected.scale[handle.userData.axis] + .28) * handle.userData.sign;
     handle.position.copy(selected.localToWorld(localPosition));
   });
+  uniformScaleHandle.visible = editorMode === 'object' && Boolean(selected) && activeTool === 'scale';
+  if (selected) uniformScaleHandle.position.copy(selected.position);
   rotateHandles.forEach(handle => {
     handle.visible = editorMode === 'object' && Boolean(selected) && activeTool === 'rotate';
     if (!selected) return;
@@ -1068,7 +1178,34 @@ document.querySelector('#addTorus').onclick = () => addUserObject('Torus', 0xd6a
 document.querySelector('#addCone').onclick = () => addUserObject('Cone', 0xc56b45, [Math.random() * 3 - 1.5, .9, Math.random() * 2 - 1]);
 document.querySelector('#addCrown').onclick = () => addUserObject('Crown', 0xd6a843, [Math.random() * 3 - 1.5, .9, Math.random() * 2 - 1]);
 document.querySelector('#edgeRounding').addEventListener('input', event => { rememberScene(); setEdgeRounding(event.target.value); });
-['posX','posY','posZ','scaleX','scaleY','scaleZ'].forEach(id => document.querySelector(`#${id}`).addEventListener('input', event => { if (!selected) return; const prop = id.startsWith('pos') ? 'position' : 'scale'; const axis = id.slice(-1).toLowerCase(); selected[prop][axis] = Number(event.target.value); }));
+let transformInputEditing = false;
+let transformInputChanged = false;
+function beginTransformInputEdit() {
+  if (!selected || transformInputEditing) return;
+  rememberScene();
+  transformInputEditing = true;
+}
+function finishTransformInputEdit() {
+  if (!transformInputEditing) return;
+  transformInputEditing = false;
+  if (!transformInputChanged) return;
+  commitAutoKeyframe();
+  saveSceneAutomatically();
+  transformInputChanged = false;
+}
+['posX','posY','posZ','scaleX','scaleY','scaleZ'].forEach(id => {
+  const input = document.querySelector(`#${id}`);
+  input.addEventListener('input', event => {
+    if (!selected) return;
+    beginTransformInputEdit();
+    const prop = id.startsWith('pos') ? 'position' : 'scale';
+    const axis = id.slice(-1).toLowerCase();
+    selected[prop][axis] = Number(event.target.value);
+    transformInputChanged = true;
+  });
+  input.addEventListener('change', finishTransformInputEdit);
+  input.addEventListener('blur', finishTransformInputEdit);
+});
 const uniformScaleInput = document.querySelector('#uniformScale');
 let uniformScaleEditOpen = false;
 let uniformScaleChanged = false;
@@ -1081,7 +1218,10 @@ function beginUniformScaleEdit() {
 function finishUniformScaleEdit() {
   if (!uniformScaleEditOpen) return;
   uniformScaleEditOpen = false;
-  if (uniformScaleChanged) saveSceneAutomatically();
+  if (uniformScaleChanged) {
+    commitAutoKeyframe();
+    saveSceneAutomatically();
+  }
   uniformScaleChanged = false;
 }
 uniformScaleInput.addEventListener('pointerdown', beginUniformScaleEdit);
@@ -1208,7 +1348,7 @@ renderer.domElement.addEventListener('pointerdown', event => {
     return;
   }
   const activeTool = document.querySelector('.tool.active')?.dataset.tool;
-  const handleHit = activeTool === 'scale' ? raycaster.intersectObjects(scaleHandles, true)[0] : null;
+  const handleHit = activeTool === 'scale' ? raycaster.intersectObjects([...scaleHandles, uniformScaleHandle], true)[0] : null;
   if (handleHit && selected) {
     rememberScene();
     event.preventDefault();
@@ -1253,14 +1393,16 @@ renderer.domElement.addEventListener('pointerdown', event => {
     selectObject(hit.object);
     rememberScene();
     controls.enabled = false;
-    if (activeTool === 'select') {
-      const cameraNormal = new THREE.Vector3();
-      camera.getWorldDirection(cameraNormal);
-      grabPlane.setFromNormalAndCoplanarPoint(cameraNormal, hit.object.position);
-      if (raycaster.ray.intersectPlane(grabPlane, grabPoint)) grabOffset.copy(hit.object.position).sub(grabPoint);
-      dragStart = { kind: 'grab', position: hit.object.position.clone() };
+    if (activeTool === 'select' || activeTool === 'move') {
+      const cameraNormal = camera.getWorldDirection(new THREE.Vector3());
+      grabPlane.setFromNormalAndCoplanarPoint(cameraNormal, hit.point);
+      const startPoint = raycaster.ray.intersectPlane(grabPlane, new THREE.Vector3());
+      if (startPoint) {
+        dragOffset.copy(hit.object.position).sub(startPoint);
+        dragStart = { kind: 'planeMove', x: event.clientX, y: event.clientY, position: hit.object.position.clone(), transformChanged: false };
+      }
     } else {
-      dragStart = { x: event.clientX, y: event.clientY, position: hit.object.position.clone(), scale: hit.object.scale.clone() };
+      dragStart = { kind: 'uniformScale', x: event.clientX, y: event.clientY, position: hit.object.position.clone(), scale: hit.object.scale.clone(), transformChanged: false };
     }
   } else if (activeTool === 'select') {
     clearSelection();
@@ -1344,13 +1486,39 @@ renderer.domElement.addEventListener('pointermove', event => {
   const dx = (event.clientX - dragStart.x) * .012;
   const dy = (event.clientY - dragStart.y) * .012;
   if (dragStart.kind === 'grab') {
-    if (raycaster.ray.intersectPlane(grabPlane, grabPoint)) selected.position.copy(grabPoint).add(grabOffset);
+    if (raycaster.ray.intersectPlane(grabPlane, grabPoint)) {
+      const nextPosition = grabPoint.clone().add(grabOffset);
+      if (selected.position.distanceToSquared(nextPosition) > 1e-8) dragStart.transformChanged = true;
+      selected.position.copy(nextPosition);
+    }
+    syncInputs();
+    return;
+  }
+  if (dragStart.kind === 'planeMove') {
+    if (raycaster.ray.intersectPlane(grabPlane, grabPoint)) {
+      const nextPosition = grabPoint.clone().add(grabOffset);
+      if (dragStart.position.distanceToSquared(nextPosition) > 1e-8) dragStart.transformChanged = true;
+      selected.position.copy(nextPosition);
+    }
+    syncInputs();
+    return;
+  }
+  if (dragStart.kind === 'uniformScale') {
+    const amount = (event.clientY - dragStart.y) * .01;
+    if (Math.abs(amount) > 1e-5) dragStart.transformChanged = true;
+    const factor = Math.exp(-amount);
+    selected.scale.set(
+      Math.max(.1, dragStart.scale.x * factor),
+      Math.max(.1, dragStart.scale.y * factor),
+      Math.max(.1, dragStart.scale.z * factor)
+    );
     syncInputs();
     return;
   }
   if (dragStart.moveAxis) {
     const axis = dragStart.moveAxis;
     selected.position[axis] = dragStart.position[axis] + (axis === 'y' ? -dy : dx);
+    if (Math.hypot(event.clientX - dragStart.x, event.clientY - dragStart.y) >= 2) dragStart.transformChanged = true;
     syncInputs();
     return;
   }
@@ -1368,12 +1536,21 @@ renderer.domElement.addEventListener('pointermove', event => {
     else if (angleDelta < -Math.PI) angleDelta += Math.PI * 2;
     dragStart.rotationDelta += angleDelta;
     dragStart.rotationLastAngle = angle;
+    if (Math.abs(dragStart.rotationDelta) > 1e-5) dragStart.transformChanged = true;
     const axisRotation = new THREE.Quaternion().setFromAxisAngle(dragStart.rotationAxis, snappedRotation(dragStart.rotationDelta));
     selected.quaternion.copy(axisRotation.multiply(dragStart.quaternion));
     syncInputs();
     return;
   }
   if (dragStart.kind === 'scale') {
+    if (dragStart.handle.userData.uniform) {
+      const amount = (event.clientY - dragStart.y) * .01;
+      const factor = Math.exp(-amount);
+      selected.scale.copy(dragStart.scale).multiplyScalar(factor);
+      if (Math.abs(factor - 1) > 1e-5) dragStart.transformChanged = true;
+      syncInputs();
+      return;
+    }
     const axis = dragStart.handle.userData.axis;
     const sign = dragStart.handle.userData.sign;
     const delta = axis === 'y' ? -dy : dx;
@@ -1381,6 +1558,7 @@ renderer.domElement.addEventListener('pointermove', event => {
     const scaleDelta = nextScale - dragStart.scale[axis];
     const baseHalfSize = selected.geometry.parameters?.width ? new THREE.Vector3(selected.geometry.parameters.width, selected.geometry.parameters.height, selected.geometry.parameters.depth).multiplyScalar(.5)[axis] : .85;
     selected.scale[axis] = nextScale;
+    if (Math.abs(scaleDelta) > 1e-5) dragStart.transformChanged = true;
     selected.rotation.copy(dragStart.rotation);
     const localShift = new THREE.Vector3();
     localShift[axis] = scaleDelta * baseHalfSize * sign;
@@ -1389,12 +1567,16 @@ renderer.domElement.addEventListener('pointermove', event => {
     return;
   }
   const activeTool = document.querySelector('.tool.active')?.dataset.tool;
-  if (activeTool === 'scale') { const delta = (dx - dy) * .5; const uniformScale = Math.max(.1, dragStart.scale.x + delta); selected.scale.set(uniformScale, uniformScale, uniformScale); }
-  else if (activeTool === 'rotate') { selected.rotation.y = snappedRotation(dragStart.rotation?.y + dx || dx); }
-  else selected.position.set(dragStart.position.x + dx, dragStart.position.y - dy, dragStart.position.z);
+  if (activeTool === 'scale') { const delta = (dx - dy) * .5; const uniformScale = Math.max(.1, dragStart.scale.x + delta); selected.scale.set(uniformScale, uniformScale, uniformScale); if (Math.abs(delta) > 1e-5) dragStart.transformChanged = true; }
+  else if (activeTool === 'rotate') { selected.rotation.y = snappedRotation(dragStart.rotation?.y + dx || dx); if (Math.abs(dx) > 1e-5) dragStart.transformChanged = true; }
+  else { selected.position.set(dragStart.position.x + dx, dragStart.position.y - dy, dragStart.position.z); if (Math.hypot(event.clientX - dragStart.x, event.clientY - dragStart.y) >= 2) dragStart.transformChanged = true; }
   syncInputs();
 });
 window.addEventListener('pointerup', () => {
+  if (dragStart?.transformChanged && selected) {
+    commitAutoKeyframe();
+    saveSceneAutomatically();
+  }
   if (dragStart?.kind === 'sculpt' && dragStart.changed && selected) {
     discardSelectionOutline();
     selectionOutline = new THREE.LineSegments(new THREE.EdgesGeometry(selected.geometry), new THREE.LineBasicMaterial({ color: 0xf26639, transparent: true, opacity: .95, depthTest: false }));
@@ -1450,9 +1632,12 @@ window.addEventListener('keydown', event => {
 });
 document.querySelector('#previousFrameButton').addEventListener('click', () => { stopPlayback(); setCurrentFrame(Math.round(currentFrame) - 1); });
 document.querySelector('#nextFrameButton').addEventListener('click', () => { stopPlayback(); setCurrentFrame(Math.round(currentFrame) + 1); });
+document.querySelector('#previousKeyframeButton').addEventListener('click', () => { stopPlayback(); navigateKeyframe(-1); });
+document.querySelector('#nextKeyframeButton').addEventListener('click', () => { stopPlayback(); navigateKeyframe(1); });
 document.querySelector('#playAnimationButton').addEventListener('click', togglePlayback);
 document.querySelector('#addKeyframeButton').addEventListener('click', insertKeyframe);
 document.querySelector('#deleteKeyframeButton').addEventListener('click', deleteKeyframe);
+document.querySelector('#autoKeyInput').addEventListener('change', updateTimeline);
 document.querySelector('#currentFrameInput').addEventListener('change', event => { stopPlayback(); setCurrentFrame(Math.round(Number(event.target.value))); });
 document.querySelector('#endFrameInput').addEventListener('change', event => {
   const maximumKeyframe = objects.reduce((max, mesh) => keyframesFor(mesh).reduce((trackMax, keyframe) => Math.max(trackMax, keyframe.frame), max), 0);
@@ -1472,6 +1657,7 @@ document.querySelector('#interpolationSelect').addEventListener('change', event 
   keyframe.interpolation = ['linear', 'ease', 'constant'].includes(event.target.value) ? event.target.value : 'linear';
   applyAnimationFrame(currentFrame);
   updateTimeline();
+  saveSceneAutomatically();
 });
 document.querySelector('#animationWorkspaceButton').addEventListener('click', () => openAnimationWorkspace('graph'));
 document.querySelector('#closeAnimationWorkspace').addEventListener('click', () => {
@@ -1514,7 +1700,11 @@ document.querySelector('#animationGraph').addEventListener('pointerdown', event 
   const finish = () => {
     window.removeEventListener('pointermove', move);
     window.removeEventListener('pointerup', finish);
-    if (changed) { updateTimeline(); updateAnimationWorkspace(); }
+    if (changed) {
+      updateTimeline();
+      updateAnimationWorkspace();
+      saveSceneAutomatically();
+    }
   };
   if (Number.isFinite(initial)) {
     window.addEventListener('pointermove', move);
@@ -1611,12 +1801,74 @@ document.querySelector('#materialOpacity').addEventListener('input', event => {
   const value = THREE.MathUtils.clamp(Number(event.target.value), .05, 1);
   meshMaterials(selected).forEach(material => {
     material.opacity = value;
-    material.transparent = value < 1;
-    material.depthWrite = value === 1;
+    material.transparent = value < 1 || Boolean(material.map);
+    material.depthWrite = value === 1 && !material.map;
     material.needsUpdate = true;
   });
   document.querySelector('#materialOpacityValue').textContent = value.toFixed(2);
   importedSerialization.delete(selected);
+});
+async function imageFileToDataUrl(file) {
+  if (file.size > MAX_IMAGE_FILE_BYTES) throw new Error(`Choose an image smaller than ${MAX_IMAGE_FILE_BYTES / 1024 / 1024} MB.`);
+  if (!file.type.startsWith('image/')) throw new Error('Choose a valid image file.');
+  const bitmap = await createImageBitmap(file);
+  try {
+    const canvas = document.createElement('canvas');
+    const initialScale = Math.min(1, 1536 / Math.max(bitmap.width, bitmap.height));
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const scale = initialScale * Math.pow(.78, attempt);
+      canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+      canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+      const context = canvas.getContext('2d');
+      if (!context) throw new Error('Could not prepare this image for the material.');
+      context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+      const quality = Math.max(.48, .84 - attempt * .09);
+      const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/webp', quality));
+      if (!blob) throw new Error('Could not encode this image. Try another file.');
+      const dataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => typeof reader.result === 'string' ? resolve(reader.result) : reject(new Error('Could not read the processed image.'));
+        reader.onerror = () => reject(new Error('Could not read the processed image.'));
+        reader.readAsDataURL(blob);
+      });
+      if (dataUrl.length <= MAX_IMAGE_DATA_URL_CHARS) return dataUrl;
+    }
+    throw new Error('This image is too detailed to store in a project. Choose a smaller image.');
+  } finally {
+    bitmap.close();
+  }
+}
+document.querySelector('#uploadImageTextureButton').addEventListener('click', () => {
+  if (!selected) {
+    window.alert('Select a part before adding an image.');
+    return;
+  }
+  document.querySelector('#imageTextureInput').click();
+});
+document.querySelector('#imageTextureInput').addEventListener('change', async event => {
+  const file = event.target.files?.[0];
+  event.target.value = '';
+  if (!file || !selected) return;
+  const target = selected;
+  try {
+    const dataUrl = await imageFileToDataUrl(file);
+    const texture = await loadImageTexture(dataUrl);
+    if (!objects.includes(target)) {
+      texture.dispose();
+      throw new Error('The selected part no longer exists.');
+    }
+    rememberScene();
+    applyImageTexture(target, texture, dataUrl, file.name.slice(0, 120));
+    saveSceneAutomatically();
+  } catch (error) {
+    window.alert(`Could not apply image to the part: ${error.message}`);
+  }
+});
+document.querySelector('#removeImageTextureButton').addEventListener('click', () => {
+  if (!selected?.userData.modelrImageTexture) return;
+  rememberScene();
+  removeImageTexture(selected);
+  saveSceneAutomatically();
 });
 const partContext = document.querySelector('#partContext');
 let contextPart = null;
@@ -1681,6 +1933,7 @@ const projectInput = document.querySelector('#projectNameInput');
 const projectStatus = document.querySelector('#projectStatus');
 let projectModalMode = 'save';
 let closeAfterSave = false;
+let projectNameRequired = false;
 let currentProjectName = localStorage.getItem('modelrProjectName') || '';
 if (currentProjectName) document.querySelector('#projectName').textContent = currentProjectName;
 function projects() { try { const saved = JSON.parse(localStorage.getItem('modelrProjects') || '[]'); return Array.isArray(saved) ? saved : []; } catch (error) { localStorage.removeItem('modelrProjects'); return []; } }
@@ -1713,13 +1966,13 @@ async function syncCloudProjects() {
     localStorage.removeItem('modelrProjectName');
     localStorage.removeItem('modelrSceneV2');
     restoreScene([]);
-    document.querySelector('#projectName').textContent = 'Untitled scene';
+    document.querySelector('#projectName').textContent = 'New project';
   }
 }
 function renderProjects() {
   const list = document.querySelector('#projectList');
   const saved = projects();
-  list.innerHTML = saved.length ? saved.map(project => `<button class="project-row" data-project="${project.id}" title="Double-click to open or save here">◈ <span><b>${project.name}</b><small>Last update: ${project.updatedAt ? new Date(project.updatedAt).toLocaleString('en-US') : 'Unknown'}</small></span><small>${project.objects} objects</small></button>`).join('') : '<div class="project-empty">No saved projects yet.</div>';
+  list.innerHTML = saved.length ? saved.map(project => `<button class="project-row" data-project="${escapeListText(project.id)}" title="Double-click to open">◈ <span><b>${escapeListText(project.name)}</b><small>Last update: ${project.updatedAt ? new Date(project.updatedAt).toLocaleString('en-US') : 'Unknown'}</small></span><small>${Number(project.objects) || 0} objects</small></button>`).join('') : '<div class="project-empty">No saved projects yet.</div>';
   list.querySelectorAll('.project-row').forEach(row => row.ondblclick = async () => {
     const project = projects().find(item => item.id === row.dataset.project);
     if (!project) return;
@@ -1747,7 +2000,11 @@ async function openProjectWithLoader(project) {
   loader.classList.add('open');
   loader.setAttribute('aria-hidden', 'false');
   try {
-    const fullProject = await apiRequest(`/api/projects/${encodeURIComponent(project.id)}`);
+    if (currentProjectName) await autoSaveScene();
+    const fullProject = localStorage.getItem('modelrCloudUser')
+      ? await apiRequest(`/api/projects/${encodeURIComponent(project.id)}`)
+      : project;
+    if (!Array.isArray(fullProject.scene)) throw new Error('This project does not contain a saved scene.');
     restoreScene(fullProject.scene);
     localStorage.removeItem('modelrSceneV2');
     currentProjectName = fullProject.name;
@@ -1765,8 +2022,31 @@ async function openProjectWithLoader(project) {
     loader.setAttribute('aria-hidden', 'true');
   }
 }
-function openProjectModal(mode) { projectModalMode = mode; document.querySelector('#projectModalEyebrow').textContent = mode === 'confirm' ? 'CLOSE PROJECT' : mode === 'projects' ? 'PROJECTS' : 'SAVE PROJECT'; document.querySelector('#projectModalTitle').textContent = mode === 'confirm' ? 'Do you want to save this project?' : mode === 'projects' ? 'Your projects.' : 'Save your project.'; document.querySelector('#projectModalHelp').textContent = mode === 'confirm' ? 'Your changes will not be saved.' : mode === 'projects' ? 'Open a previously saved project.' : 'Give your project a name so you can open it later.'; projectInput.style.display = mode === 'save' ? 'block' : 'none'; document.querySelector('#confirmProjectModal').textContent = mode === 'confirm' ? 'Yes, save' : mode === 'projects' ? 'Close' : 'Save project'; document.querySelector('#cancelProjectModal').textContent = mode === 'confirm' ? 'No, close' : 'Cancel'; projectStatus.textContent = ''; if (mode === 'save') projectInput.value = currentProjectName; renderProjects(); projectModal.classList.add('open'); projectModal.style.display = 'grid'; }
+function openProjectModal(mode, requireName = false) {
+  projectModalMode = mode;
+  projectNameRequired = requireName;
+  projectModal.classList.toggle('new-project-required', requireName);
+  document.querySelector('#projectModalEyebrow').textContent = mode === 'confirm' ? 'CLOSE PROJECT' : mode === 'projects' ? 'PROJECTS' : mode === 'new' ? 'NEW PROJECT' : 'SAVE PROJECT';
+  document.querySelector('#projectModalTitle').textContent = mode === 'confirm' ? 'Do you want to save this project?' : mode === 'projects' ? 'Your projects.' : mode === 'new' ? 'Name your new project.' : 'Save your project.';
+  document.querySelector('#projectModalHelp').textContent = mode === 'confirm' ? 'Your changes will be saved automatically.' : mode === 'projects' ? 'Open a previously saved project.' : mode === 'new' ? 'Choose a name before you start working. Your project will save automatically.' : 'Give your project a name so you can open it later.';
+  projectInput.style.display = mode === 'save' || mode === 'new' ? 'block' : 'none';
+  document.querySelector('#confirmProjectModal').textContent = mode === 'confirm' ? 'Close project' : mode === 'projects' ? 'Close' : mode === 'new' ? 'Create project' : 'Save project';
+  document.querySelector('#cancelProjectModal').textContent = mode === 'confirm' ? 'Back to project' : 'Cancel';
+  projectStatus.textContent = '';
+  if (mode === 'save') projectInput.value = currentProjectName;
+  else if (mode === 'new') projectInput.value = '';
+  renderProjects();
+  projectModal.classList.add('open');
+  projectModal.style.display = 'grid';
+  if (mode === 'new') requestAnimationFrame(() => projectInput.focus());
+}
 function showProjectList() { authScreen.style.display = 'none'; appShell.setAttribute('aria-hidden', 'true'); openProjectModal('projects'); projectModal.classList.add('open'); projectModal.style.setProperty('display', 'grid', 'important'); projectModal.style.setProperty('visibility', 'visible', 'important'); projectModal.style.setProperty('opacity', '1', 'important'); projectModal.style.setProperty('z-index', '9999', 'important'); const card = document.querySelector('.project-card'); card.style.setProperty('display', 'block', 'important'); card.style.setProperty('visibility', 'visible', 'important'); card.style.setProperty('opacity', '1', 'important'); }
+function returnFromProjectList() {
+  projectModal.classList.remove('open');
+  projectModal.style.display = 'none';
+  if (currentProjectName) appShell.setAttribute('aria-hidden', 'false');
+  else openProjectModal('new', true);
+}
 async function saveProject() {
   const name = projectInput.value.trim();
   if (!name) { projectStatus.textContent = 'Enter a project name first.'; projectInput.focus(); return; }
@@ -1774,35 +2054,73 @@ async function saveProject() {
   const existing = projects().find(project => project.name === name);
   const project = { id: existing?.id || `${Date.now()}-${name}`, name, objects: objects.length, updatedAt: new Date().toISOString(), scene };
   try {
-    const requestBody = prepareJsonRequest(project);
-    const savedProject = await apiRequest('/api/projects', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: requestBody });
-    const { scene: savedScene, ...projectMetadata } = savedProject;
+    const savedProject = localStorage.getItem('modelrCloudUser')
+      ? await apiRequest('/api/projects', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: prepareJsonRequest(project) })
+      : project;
     const saved = projects().filter(item => item.id !== savedProject.id);
-    saved.unshift(projectMetadata);
+    saved.unshift(localStorage.getItem('modelrCloudUser')
+      ? (({ scene: savedScene, ...metadata }) => metadata)(savedProject)
+      : savedProject);
     localStorage.setItem('modelrProjects', JSON.stringify(saved));
     localStorage.removeItem('modelrSceneV2');
     localStorage.setItem('modelrProjectName', name);
-  } catch (error) { projectStatus.textContent = `Could not save to cloud: ${error.message}`; return; }
+  } catch (error) { projectStatus.textContent = `Could not save project: ${error.message}`; return; }
   currentProjectName = name;
   document.querySelector('#projectName').textContent = name;
   if (closeAfterSave) { closeAfterSave = false; showProjectList(); }
   else { projectModal.classList.remove('open'); projectModal.style.display = 'none'; }
 }
+async function createNewProject() {
+  const name = projectInput.value.trim();
+  if (!name) { projectStatus.textContent = 'Enter a project name first.'; projectInput.focus(); return; }
+  if (projects().some(project => project.name.toLocaleLowerCase() === name.toLocaleLowerCase())) {
+    projectStatus.textContent = 'A project with that name already exists. Choose a different name.';
+    projectInput.focus();
+    return;
+  }
+  const project = { id: `${Date.now()}-${name}`, name, objects: 0, updatedAt: new Date().toISOString(), scene: [] };
+  try {
+    const savedProject = localStorage.getItem('modelrCloudUser')
+      ? await apiRequest('/api/projects', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: prepareJsonRequest(project) })
+      : project;
+    const saved = projects().filter(item => item.id !== savedProject.id);
+    saved.unshift(localStorage.getItem('modelrCloudUser')
+      ? (({ scene: savedScene, ...metadata }) => metadata)(savedProject)
+      : savedProject);
+    localStorage.setItem('modelrProjects', JSON.stringify(saved));
+    localStorage.setItem('modelrProjectName', savedProject.name);
+    localStorage.removeItem('modelrSceneV2');
+    currentProjectName = savedProject.name;
+    document.querySelector('#projectName').textContent = currentProjectName;
+    restoreScene([]);
+    projectNameRequired = false;
+    projectModal.classList.remove('open', 'new-project-required');
+    projectModal.style.display = 'none';
+  } catch (error) {
+    projectStatus.textContent = `Could not create project: ${error.message}`;
+  }
+}
 async function autoSaveScene() {
+  if (!currentProjectName) return;
   const sceneData = sceneSnapshot();
   if (!localStorage.getItem('modelrCloudUser')) {
-    localStorage.setItem('modelrSceneV2', JSON.stringify(sceneData));
+    const savedProjects = projects();
+    const existing = savedProjects.find(project => project.name === currentProjectName);
+    const project = {
+      id: existing?.id || `${Date.now()}-${currentProjectName}`,
+      name: currentProjectName,
+      objects: objects.length,
+      updatedAt: new Date().toISOString(),
+      scene: sceneData
+    };
+    localStorage.setItem('modelrProjects', JSON.stringify([project, ...savedProjects.filter(item => item.id !== project.id)]));
+    localStorage.setItem('modelrProjectName', currentProjectName);
+    localStorage.removeItem('modelrSceneV2');
     return;
   }
 
   const savedProjects = projects();
-  let name = currentProjectName;
-  if (!name) {
-    const existingNames = new Set(savedProjects.map(project => project.name));
-    name = 'Untitled scene';
-    let suffix = 2;
-    while (existingNames.has(name)) name = `Untitled scene ${suffix++}`;
-  }
+  const name = currentProjectName;
   const existing = savedProjects.find(project => project.name === name);
   const project = {
     id: existing?.id || `${Date.now()}-${name}`,
@@ -1945,17 +2263,114 @@ document.querySelector('#exportModelButton').onclick = async () => {
     window.alert(`Could not export model: ${error.message || error}`);
   }
 };
-document.querySelector('#closeProjectButton').onclick = () => { fileDropdown.classList.remove('open'); openProjectModal('confirm'); };
-document.querySelector('#projectsButton').onclick = () => { fileDropdown.classList.remove('open'); openProjectModal('projects'); };
-document.querySelector('#newProjectButton').onclick = () => { fileDropdown.classList.remove('open'); currentProjectName = ''; document.querySelector('#projectName').textContent = 'Untitled scene'; restoreScene([]); };
-document.querySelector('#deleteProjectButton').onclick = async () => { fileDropdown.classList.remove('open'); if (currentProjectName && !window.confirm(`Delete project "${currentProjectName}"?`)) return; const deleting = projects().filter(project => project.name === currentProjectName); try { for (const project of deleting) await apiRequest(`/api/projects/${encodeURIComponent(project.id)}`, { method: 'DELETE' }); } catch (error) { window.alert(`Could not delete cloud project: ${error.message}`); return; } const saved = projects().filter(project => project.name !== currentProjectName); localStorage.setItem('modelrProjects', JSON.stringify(saved)); localStorage.removeItem('modelrSceneV2'); localStorage.removeItem('modelrProjectName'); currentProjectName = ''; document.querySelector('#projectName').textContent = 'Untitled scene'; restoreScene([]); };
-document.querySelector('#closeProjectModal').onclick = () => { projectModal.classList.remove('open'); projectModal.style.display = 'none'; };
-document.querySelector('#cancelProjectModal').onclick = () => { if (projectModalMode === 'confirm') closeProject(); else { projectModal.classList.remove('open'); projectModal.style.display = 'none'; } };
-document.querySelector('#confirmProjectModal').onclick = () => { if (projectModalMode === 'confirm') { closeAfterSave = true; openProjectModal('save'); } else if (projectModalMode === 'projects') { projectModal.classList.remove('open'); projectModal.style.display = 'none'; } else saveProject(); };
-document.querySelector('#saveButton').onclick = () => { openProjectModal('save'); };
-window.addEventListener('beforeunload', () => {
-  if (!localStorage.getItem('modelrCloudUser')) void autoSaveScene();
+async function leaveProject() {
+  try {
+    if (currentProjectName) await autoSaveScene();
+    showProjectList();
+  } catch (error) {
+    projectModalMode = 'projects';
+    openProjectModal('projects');
+    projectStatus.textContent = `Could not save before closing: ${error.message}`;
+  }
+}
+document.querySelector('#closeProjectButton').onclick = () => { fileDropdown.classList.remove('open'); void leaveProject(); };
+document.querySelector('#projectsButton').onclick = () => { fileDropdown.classList.remove('open'); void leaveProject(); };
+document.querySelector('#newProjectButton').onclick = async () => {
+  fileDropdown.classList.remove('open');
+  try {
+    if (currentProjectName) await autoSaveScene();
+    openProjectModal('new');
+  } catch (error) {
+    openProjectModal('save');
+    projectStatus.textContent = `Could not save the current project: ${error.message}`;
+  }
+};
+document.querySelector('#deleteProjectButton').onclick = async () => {
+  fileDropdown.classList.remove('open');
+  if (currentProjectName && !window.confirm(`Delete project "${currentProjectName}"?`)) return;
+  const deleting = projects().filter(project => project.name === currentProjectName);
+  try {
+    if (localStorage.getItem('modelrCloudUser')) {
+      for (const project of deleting) await apiRequest(`/api/projects/${encodeURIComponent(project.id)}`, { method: 'DELETE' });
+    }
+  } catch (error) {
+    window.alert(`Could not delete project: ${error.message}`);
+    return;
+  }
+  const saved = projects().filter(project => project.name !== currentProjectName);
+  localStorage.setItem('modelrProjects', JSON.stringify(saved));
+  localStorage.removeItem('modelrSceneV2');
+  localStorage.removeItem('modelrProjectName');
+  currentProjectName = '';
+  document.querySelector('#projectName').textContent = 'New project';
+  restoreScene([]);
+  openProjectModal('new', true);
+};
+document.querySelector('#closeProjectModal').onclick = () => {
+  if (projectNameRequired) return;
+  if (projectModalMode === 'projects') returnFromProjectList();
+  else { projectModal.classList.remove('open'); projectModal.style.display = 'none'; }
+};
+document.querySelector('#cancelProjectModal').onclick = () => {
+  if (projectNameRequired) return;
+  if (projectModalMode === 'projects') returnFromProjectList();
+  else if (projectModalMode === 'confirm') closeProject();
+  else { projectModal.classList.remove('open'); projectModal.style.display = 'none'; }
+};
+document.querySelector('#confirmProjectModal').onclick = () => {
+  if (projectModalMode === 'confirm') { closeAfterSave = true; openProjectModal('save'); }
+  else if (projectModalMode === 'projects') returnFromProjectList();
+  else if (projectModalMode === 'new') void createNewProject();
+  else void saveProject();
+};
+document.querySelector('#saveButton').onclick = () => { openProjectModal(currentProjectName ? 'save' : 'new', !currentProjectName); };
+projectInput.addEventListener('keydown', event => {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    if (projectModalMode === 'new') void createNewProject();
+    else if (projectModalMode === 'save') void saveProject();
+  }
 });
+function saveProjectOnExit() {
+  if (!currentProjectName) return;
+  const now = Date.now();
+  if (now - lastExitSaveAt < 1000) return;
+  lastExitSaveAt = now;
+  const scene = sceneSnapshot();
+  if (!localStorage.getItem('modelrCloudUser')) {
+    try {
+      const savedProjects = projects();
+      const existing = savedProjects.find(project => project.name === currentProjectName);
+      const project = { id: existing?.id || `${Date.now()}-${currentProjectName}`, name: currentProjectName, objects: objects.length, updatedAt: new Date().toISOString(), scene };
+      localStorage.setItem('modelrProjects', JSON.stringify([project, ...savedProjects.filter(item => item.id !== project.id)]));
+      localStorage.setItem('modelrProjectName', currentProjectName);
+    } catch (error) {
+      console.error('Could not save the local project while leaving the page.', error);
+    }
+    return;
+  }
+  const existing = projects().find(project => project.name === currentProjectName);
+  if (!existing) return;
+  try {
+    const body = prepareJsonRequest({ ...existing, objects: objects.length, updatedAt: new Date().toISOString(), scene });
+    if (body.length > 60000) return;
+    void fetch('/api/projects', {
+      method: 'PUT',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+      keepalive: true
+    }).catch(error => console.error('Could not finish cloud autosave while leaving the page.', error));
+  } catch (error) {
+    console.error('Could not prepare the project autosave while leaving the page.', error);
+  }
+}
+let lastExitSaveAt = 0;
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') saveSceneAutomatically();
+});
+window.addEventListener('pagehide', saveProjectOnExit);
+window.addEventListener('beforeunload', saveProjectOnExit);
 function animate() { requestAnimationFrame(animate); updateCameraMovement(); renderScene(); } animate();
 
 const authForm = document.querySelector('#authForm');
@@ -1966,6 +2381,7 @@ function enterStudio(email) {
   document.querySelector('#emailInput').value = email;
   authScreen.style.display = 'none';
   appShell.setAttribute('aria-hidden', 'false');
+  if (!currentProjectName) openProjectModal('new', true);
 }
 async function migrateLocalProjectsForAccount(email, password) {
   const cachedUser = localStorage.getItem('modelrCloudUser');
