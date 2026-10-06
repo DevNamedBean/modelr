@@ -10,7 +10,7 @@ Modelr is een browsergebaseerde 3D-scène-editor voor eenvoudige scènes. De hui
 - Animatietijdlijn op 24 fps met scrubben, frame-navigatie, afspelen/pauzeren, loopen en instelbaar eindframe. De dope sheet toont locatie-, rotatie-, schaal- en kleurtracks. De Animation Workspace is via de linkerwerkbalk of de tijdlijn te openen en bevat een Graph Editor (kanalen aanpassen door keyframes te slepen), NLA-editor (herbruikbare actions/strips, positie, herhalingen, snelheid, mix en mute), drivers met veilig beperkte wiskundige expressies en shape keys die je in Edit Mode kunt vastleggen en keyframen. Interpolatie ondersteunt Linear, Ease In/Out en Constant. Animatiedata wordt in lokale en cloudprojecten opgeslagen.
 - glTF- en GLB-modellen importeren, met bijbehorende bestanden of vanuit een ZIP-archief; scènes exporteren als GLB.
 - Gegenereerde Three.js-scènecode bekijken en aangepaste code toepassen voor de ondersteunde basisvormen.
-- Projecten lokaal in de browser bewaren. Met een geconfigureerde PostgreSQL-database kunnen gebruikers accounts maken en projecten in de cloud bewaren.
+- Projecten lokaal in de browser bewaren. Toegevoegde, gekopieerde, geïmporteerde en uit code toegepaste parts worden automatisch opgeslagen; voor cloudaccounts worden ze in het actieve project bewaard, of wordt een nieuw project aangemaakt. Met een geconfigureerde PostgreSQL-database kunnen gebruikers accounts maken en projecten in de cloud bewaren.
 
 De editor is bedoeld voor lichte scènes en begrenst een scène op 300 objecten en 250.000 driehoeken. De viewport is een realtime 3D-preview; er is geen aparte render-engine voor definitieve renders.
 

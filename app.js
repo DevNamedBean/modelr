@@ -691,7 +691,7 @@ function addUserObject(type, color, position) {
   candidate.material.dispose();
   if (exceedsTriangleLimit) { sceneLimitNotice(`This scene is limited to ${MAX_SCENE_TRIANGLES.toLocaleString()} triangles to keep the editor responsive.`); return; }
   rememberScene();
-  addObject(type, color, position);
+  if (addObject(type, color, position)) saveAddedPartAutomatically();
 }
 function restoreScene(snapshot) {
   stopPlayback();
@@ -767,7 +767,7 @@ function restoreScene(snapshot) {
   updateTimeline();
   updateList();
 }
-function duplicateSelected(exactPosition = false) { if (!selected) return; if (objects.length >= MAX_SCENE_OBJECTS || sceneTriangleCount() + triangleCount(selected) > MAX_SCENE_TRIANGLES) { sceneLimitNotice('This duplicate would exceed the scene performance limits.'); return; } rememberScene(); const duplicate = new THREE.Mesh(selected.geometry.clone(), Array.isArray(selected.material) ? selected.material.map(material => material.clone()) : selected.material.clone()); duplicate.name = `${selected.name} Copy ${objectIndex++}`; duplicate.position.copy(selected.position); if (!exactPosition) duplicate.position.add(new THREE.Vector3(.6, 0, .6)); duplicate.scale.copy(selected.scale); duplicate.rotation.copy(selected.rotation); duplicate.userData = { ...selected.userData, modelrAnimationId: `animation-${Date.now()}-${objectIndex}`, modelrKeyframes: (selected.userData.modelrKeyframes || []).map(keyframe => ({ ...keyframe, position: [...keyframe.position], rotation: [...keyframe.rotation], scale: [...keyframe.scale] })) }; duplicate.castShadow = selected.castShadow; duplicate.receiveShadow = selected.receiveShadow; scene.add(duplicate); objects.push(duplicate); selectObject(duplicate); updateTimeline(); updateList(); }
+function duplicateSelected(exactPosition = false) { if (!selected) return; if (objects.length >= MAX_SCENE_OBJECTS || sceneTriangleCount() + triangleCount(selected) > MAX_SCENE_TRIANGLES) { sceneLimitNotice('This duplicate would exceed the scene performance limits.'); return; } rememberScene(); const duplicate = new THREE.Mesh(selected.geometry.clone(), Array.isArray(selected.material) ? selected.material.map(material => material.clone()) : selected.material.clone()); duplicate.name = `${selected.name} Copy ${objectIndex++}`; duplicate.position.copy(selected.position); if (!exactPosition) duplicate.position.add(new THREE.Vector3(.6, 0, .6)); duplicate.scale.copy(selected.scale); duplicate.rotation.copy(selected.rotation); duplicate.userData = { ...selected.userData, modelrAnimationId: `animation-${Date.now()}-${objectIndex}`, modelrKeyframes: (selected.userData.modelrKeyframes || []).map(keyframe => ({ ...keyframe, position: [...keyframe.position], rotation: [...keyframe.rotation], scale: [...keyframe.scale] })) }; duplicate.castShadow = selected.castShadow; duplicate.receiveShadow = selected.receiveShadow; scene.add(duplicate); objects.push(duplicate); selectObject(duplicate); updateTimeline(); updateList(); saveAddedPartAutomatically(); }
 function undo() { if (!undoStack.length) return; redoStack.push(sceneSnapshot()); restoreScene(undoStack.pop()); }
 function redo() { if (!redoStack.length) return; undoStack.push(sceneSnapshot()); restoreScene(redoStack.pop()); }
 
@@ -1634,6 +1634,7 @@ document.querySelector('#applyCode').onclick = () => {
   }
   rememberScene();
   restoreScene(parsed.map(item => ({ ...item, name: item.name })));
+  saveAddedPartAutomatically();
   document.querySelector('#codeStatus').textContent = 'Scene applied.';
 };
 
@@ -1757,7 +1758,49 @@ async function saveProject() {
   if (closeAfterSave) { closeAfterSave = false; showProjectList(); }
   else { projectModal.classList.remove('open'); projectModal.style.display = 'none'; }
 }
-function autoSaveScene() { if (localStorage.getItem('modelrCloudUser')) return; try { localStorage.setItem('modelrSceneV2', JSON.stringify(sceneSnapshot())); } catch (error) { /* Keep the editor usable when browser storage is unavailable. */ } }
+async function autoSaveScene() {
+  const sceneData = sceneSnapshot();
+  if (!localStorage.getItem('modelrCloudUser')) {
+    localStorage.setItem('modelrSceneV2', JSON.stringify(sceneData));
+    return;
+  }
+
+  const savedProjects = projects();
+  let name = currentProjectName;
+  if (!name) {
+    const existingNames = new Set(savedProjects.map(project => project.name));
+    name = 'Untitled scene';
+    let suffix = 2;
+    while (existingNames.has(name)) name = `Untitled scene ${suffix++}`;
+  }
+  const existing = savedProjects.find(project => project.name === name);
+  const project = {
+    id: existing?.id || `${Date.now()}-${name}`,
+    name,
+    objects: objects.length,
+    updatedAt: new Date().toISOString(),
+    scene: sceneData
+  };
+  const savedProject = await apiRequest('/api/projects', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: prepareJsonRequest(project)
+  });
+  const { scene: savedScene, ...projectMetadata } = savedProject;
+  const updatedProjects = projects().filter(item => item.id !== savedProject.id);
+  updatedProjects.unshift(projectMetadata);
+  localStorage.setItem('modelrProjects', JSON.stringify(updatedProjects));
+  localStorage.removeItem('modelrSceneV2');
+  currentProjectName = savedProject.name;
+  localStorage.setItem('modelrProjectName', currentProjectName);
+  document.querySelector('#projectName').textContent = currentProjectName;
+}
+function saveAddedPartAutomatically() {
+  void autoSaveScene().catch(error => {
+    console.error('Automatic save after adding a part failed.', error);
+    window.alert(`Could not automatically save this scene: ${error.message}`);
+  });
+}
 function closeProject() { showProjectList(); }
 document.querySelector('#fileMenuButton').onclick = event => { event.stopPropagation(); fileDropdown.classList.toggle('open'); };
 document.addEventListener('click', event => { if (!event.target.closest('.file-menu')) fileDropdown.classList.remove('open'); });
@@ -1847,6 +1890,7 @@ modelImportInput.addEventListener('change', async event => {
     imported.forEach(mesh => { scene.add(mesh); objects.push(mesh); });
     selectObject(imported[0]);
     updateList();
+    saveAddedPartAutomatically();
   } catch (error) {
     window.alert(`Could not import model: ${error.message || error}`);
   } finally {
@@ -1879,7 +1923,9 @@ document.querySelector('#closeProjectModal').onclick = () => { projectModal.clas
 document.querySelector('#cancelProjectModal').onclick = () => { if (projectModalMode === 'confirm') closeProject(); else { projectModal.classList.remove('open'); projectModal.style.display = 'none'; } };
 document.querySelector('#confirmProjectModal').onclick = () => { if (projectModalMode === 'confirm') { closeAfterSave = true; openProjectModal('save'); } else if (projectModalMode === 'projects') { projectModal.classList.remove('open'); projectModal.style.display = 'none'; } else saveProject(); };
 document.querySelector('#saveButton').onclick = () => { openProjectModal('save'); };
-window.addEventListener('beforeunload', autoSaveScene);
+window.addEventListener('beforeunload', () => {
+  if (!localStorage.getItem('modelrCloudUser')) void autoSaveScene();
+});
 function animate() { requestAnimationFrame(animate); updateCameraMovement(); renderScene(); } animate();
 
 const authForm = document.querySelector('#authForm');
