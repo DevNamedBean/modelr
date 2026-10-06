@@ -5,6 +5,7 @@ import { GLTFLoader } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/
 import { GLTFExporter } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/exporters/GLTFExporter.js';
 import JSZip from 'https://cdn.jsdelivr.net/npm/jszip@3.10.1/+esm';
 import { evaluateDriverExpression, interpolateKeyframeAmount } from './animation-core.js';
+import { bevelEdge, extrudeTriangle, insetTriangle } from './modeling-core.js';
 
 const objects = [];
 const undoStack = [];
@@ -27,6 +28,7 @@ let selectedVertexIndex = null;
 let editorMode = 'object';
 let componentMode = 'vertex';
 let selectedComponentPoints = [];
+let selectedFaceIndex = null;
 let componentOverlay = null;
 let currentFrame = 0;
 let endFrame = DEFAULT_END_FRAME;
@@ -844,9 +846,88 @@ function componentPointsFromHit(hit) {
   if (!hit.face) return [];
   return [hit.face.a, hit.face.b, hit.face.c].map(index => new THREE.Vector3().fromBufferAttribute(position, index));
 }
+function geometryTriangles(geometry) {
+  const position = geometry.attributes.position;
+  const index = geometry.index;
+  const triangleTotal = Math.floor((index?.count || position.count) / 3);
+  return Array.from({ length: triangleTotal }, (_, triangleIndex) => {
+    const offset = triangleIndex * 3;
+    const materialIndex = geometry.groups.find(group => offset >= group.start && offset < group.start + group.count)?.materialIndex || 0;
+    const vertices = [0, 1, 2].map(corner => {
+      const vertexIndex = index ? index.getX(offset + corner) : offset + corner;
+      const attributes = Object.fromEntries(Object.entries(geometry.attributes).map(([name, attribute]) => [
+        name,
+        Array.from({ length: attribute.itemSize }, (_, component) => attribute.array[vertexIndex * attribute.itemSize + component])
+      ]));
+      return { position: attributes.position, attributes };
+    });
+    return { vertices, materialIndex };
+  });
+}
+function geometryFromTriangles(triangles, sourceGeometry) {
+  const geometry = new THREE.BufferGeometry();
+  const attributeNames = Object.keys(sourceGeometry.attributes).filter(name => name !== 'normal');
+  const attributes = Object.fromEntries(attributeNames.map(name => [name, []]));
+  let activeMaterial = null;
+  let groupStart = 0;
+  triangles.forEach((item, triangleIndex) => {
+    if (activeMaterial !== null && item.materialIndex !== activeMaterial) {
+      geometry.addGroup(groupStart, triangleIndex * 3 - groupStart, activeMaterial);
+      groupStart = triangleIndex * 3;
+    }
+    activeMaterial = item.materialIndex;
+    item.vertices.forEach(vertex => attributeNames.forEach(name => {
+      const attribute = vertex.attributes[name];
+      if (attribute) attributes[name].push(...attribute);
+      else attributes[name].push(...new Array(sourceGeometry.attributes[name].itemSize).fill(0));
+    }));
+  });
+  if (activeMaterial !== null) geometry.addGroup(groupStart, triangles.length * 3 - groupStart, activeMaterial);
+  attributeNames.forEach(name => {
+    const sourceAttribute = sourceGeometry.attributes[name];
+    geometry.setAttribute(name, new THREE.Float32BufferAttribute(attributes[name], sourceAttribute.itemSize, sourceAttribute.normalized));
+  });
+  geometry.computeVertexNormals();
+  geometry.computeBoundingBox();
+  geometry.computeBoundingSphere();
+  return geometry;
+}
+function applyMeshOperation(operation) {
+  if (!selected || editorMode !== 'edit') return;
+  const amount = Number(document.querySelector('#meshToolAmount').value);
+  try {
+    const triangles = geometryTriangles(selected.geometry);
+    let result;
+    if (operation === 'extrude') result = extrudeTriangle(triangles, selectedFaceIndex, amount);
+    else if (operation === 'inset') result = insetTriangle(triangles, selectedFaceIndex, 1 - amount);
+    else result = bevelEdge(triangles, selectedComponentPoints[0].toArray(), selectedComponentPoints[1].toArray(), amount);
+    const nextTriangleCount = sceneTriangleCount() - triangleCount(selected) + result.triangles.length;
+    if (nextTriangleCount > MAX_SCENE_TRIANGLES) throw new RangeError(`This operation would exceed the ${MAX_SCENE_TRIANGLES.toLocaleString()}-triangle scene limit.`);
+    const nextGeometry = geometryFromTriangles(result.triangles, selected.geometry);
+    rememberScene();
+    selected.geometry.dispose();
+    selected.geometry = nextGeometry;
+    importedSerialization.delete(selected);
+    selected.userData.modelrImported = false;
+    selected.userData.modelrVertexEdited = true;
+    setComponentMode('face');
+    selectedFaceIndex = result.selectedIndex;
+    const face = result.triangles[result.selectedIndex];
+    selectedComponentPoints = face.vertices.map(vertex => new THREE.Vector3(...vertex.position));
+    discardSelectionOutline();
+    selectionOutline = new THREE.LineSegments(new THREE.EdgesGeometry(selected.geometry), new THREE.LineBasicMaterial({ color: 0xf26639, transparent: true, opacity: .95, depthTest: false }));
+    selectionOutline.renderOrder = 10;
+    selected.add(selectionOutline);
+    updateVertexOverlay();
+    document.querySelector('#selectionLabel').textContent = `${selected.name} · face`;
+  } catch (error) {
+    window.alert(error.message);
+  }
+}
 function setEditorMode(mode) {
   editorMode = mode === 'edit' ? 'edit' : 'object';
   selectedVertexIndex = null;
+  selectedFaceIndex = null;
   selectedComponentPoints = [];
   document.querySelectorAll('[data-editor-mode]').forEach(button => {
     const active = button.dataset.editorMode === editorMode;
@@ -854,6 +935,7 @@ function setEditorMode(mode) {
     button.setAttribute('aria-pressed', String(active));
   });
   document.querySelector('#editComponentTools').classList.toggle('open', editorMode === 'edit');
+  document.querySelector('#meshOperations').classList.toggle('open', editorMode === 'edit');
   const label = editorMode === 'edit' ? `${componentMode[0].toUpperCase()}${componentMode.slice(1)} Edit` : 'Object Mode';
   document.querySelector('#editorModeLabel').textContent = label;
   document.querySelector('.viewport-hint').textContent = editorMode === 'edit'
@@ -911,6 +993,7 @@ const renderScene = () => { controls.update(); applyDrivers(); renderer.render(s
 new MutationObserver(() => { if (appShell.getAttribute('aria-hidden') === 'false') requestAnimationFrame(() => { resize(); renderScene(); }); }).observe(appShell, { attributes: true, attributeFilter: ['aria-hidden'] });
 
 document.querySelectorAll('.tool[data-tool]').forEach(button => button.addEventListener('click', () => { document.querySelectorAll('.tool[data-tool]').forEach(item => item.classList.remove('active')); button.classList.add('active'); updateScaleHandles(); }));
+document.querySelector('#animationToolbarButton').addEventListener('click', () => openAnimationWorkspace('graph'));
 document.querySelector('#addCube').onclick = () => addUserObject('Cube', 0x999999, [Math.random() * 3 - 1.5, .8, Math.random() * 2 - 1]);
 document.querySelector('#addSphere').onclick = () => addUserObject('Sphere', 0x7692bd, [Math.random() * 3 - 1.5, .85, Math.random() * 2 - 1]);
 document.querySelector('#addCylinder').onclick = () => addUserObject('Cylinder', 0x87a479, [Math.random() * 3 - 1.5, .75, Math.random() * 2 - 1]);
@@ -932,6 +1015,7 @@ function snappedRotation(value) { const snap = document.querySelector('#rotation
 document.querySelector('#rotationStep')?.addEventListener('input', () => { const snap = document.querySelector('#rotationSnap'); if (snap) snap.checked = true; });
 document.querySelectorAll('[data-editor-mode]').forEach(button => button.addEventListener('click', () => setEditorMode(button.dataset.editorMode)));
 document.querySelectorAll('[data-component-mode]').forEach(button => button.addEventListener('click', () => setComponentMode(button.dataset.componentMode)));
+document.querySelectorAll('[data-mesh-operation]').forEach(button => button.addEventListener('click', () => applyMeshOperation(button.dataset.meshOperation)));
 renderer.domElement.addEventListener('pointerdown', event => {
   if (event.button !== 0) return;
   if (isPlaying) stopPlayback();
@@ -942,6 +1026,7 @@ renderer.domElement.addEventListener('pointerdown', event => {
   if (editorMode === 'edit') {
     if (!selected) return;
     selectedComponentPoints = [];
+    selectedFaceIndex = null;
     let hit = null;
     const surfaceHit = raycaster.intersectObject(selected, false)[0] || null;
     if (componentMode === 'vertex' && vertexOverlay) hit = raycaster.intersectObject(vertexOverlay)[0] || null;
@@ -952,6 +1037,7 @@ renderer.domElement.addEventListener('pointerdown', event => {
     const componentPoints = hit?.componentPoints || componentPointsFromHit(hit);
     if (componentPoints.length) {
       selectedComponentPoints = componentPoints;
+      if (componentMode === 'face') selectedFaceIndex = hit.faceIndex;
       updateVertexOverlay();
       const componentIndex = componentMode === 'vertex' ? ` ${selectedVertexIndex + 1}` : '';
       document.querySelector('#selectionLabel').textContent = `${selected.name} · ${componentMode} ${componentIndex}`.trim();
