@@ -1093,7 +1093,8 @@ renderer.domElement.addEventListener('pointermove', event => {
   }
   if (dragStart.handle?.userData.rotateHandle) {
     const axis = dragStart.handle.userData.axis;
-    selected.rotation[axis] = snappedRotation(dragStart.rotation[axis] + (axis === 'y' ? -dy : dx));
+    const delta = axis === 'y' ? dx : -dy;
+    selected.rotation[axis] = snappedRotation(dragStart.rotation[axis] + delta);
     syncInputs();
     return;
   }
