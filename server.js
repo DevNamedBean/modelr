@@ -41,6 +41,21 @@ async function readJsonBody(request) {
 
 function hashToken(token) { return createHash('sha256').update(token).digest('hex'); }
 
+async function notifyDiscord(webhookUrl, content) {
+  if (!webhookUrl) return;
+  const url = new URL(webhookUrl);
+  if (url.protocol !== 'https:' || url.hostname !== 'discord.com' || !url.pathname.startsWith('/api/webhooks/')) {
+    throw new Error('Configured Discord webhook URL is invalid.');
+  }
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content }),
+    signal: AbortSignal.timeout(5000)
+  });
+  if (!response.ok) throw new Error(`Discord webhook returned HTTP ${response.status}.`);
+}
+
 function cookieValue(request, name) {
   const cookie = (request.headers.cookie || '').split(';').map(part => part.trim()).find(part => part.startsWith(`${name}=`));
   return cookie ? decodeURIComponent(cookie.slice(name.length + 1)) : '';
@@ -61,7 +76,9 @@ async function currentUser(request) {
   const token = cookieValue(request, 'modelr_session');
   if (!token) return null;
   const result = await pool.query(
-    'SELECT users.id, users.email FROM modelr_sessions JOIN modelr_users AS users ON users.id = modelr_sessions.user_id WHERE modelr_sessions.token_hash = $1 AND modelr_sessions.expires_at > NOW()',
+    `SELECT users.id, users.email
+     FROM modelr_sessions JOIN modelr_users AS users ON users.id = modelr_sessions.user_id
+     WHERE modelr_sessions.token_hash = $1 AND modelr_sessions.expires_at > NOW()`,
     [hashToken(token)]
   );
   return result.rows[0] || null;
@@ -136,6 +153,15 @@ async function handleApi(request, response, url) {
       client.release();
     }
     await createSession(user.id, response, request);
+    if (process.env.DISCORD_ACCOUNT_WEBHOOK_URL) {
+      try {
+        const countResult = await pool.query('SELECT COUNT(*)::integer AS count FROM modelr_users');
+        const accountCount = countResult.rows[0].count;
+        await notifyDiscord(process.env.DISCORD_ACCOUNT_WEBHOOK_URL, `New Account Creation this is the ${accountCount} Account on Modelr`);
+      } catch (error) {
+        console.error('Could not send account creation notification to Discord:', error);
+      }
+    }
     sendJson(response, 201, { email: user.email });
     return;
   }
@@ -239,6 +265,9 @@ async function handleRequest(request, response) {
   try { requestPath = decodeURIComponent(url.pathname); }
   catch { response.writeHead(400); response.end('Bad request'); return; }
   const relativePath = requestPath === '/' ? '/index.html' : requestPath;
+  if (relativePath === '/private' || relativePath.startsWith('/private/')) {
+    response.writeHead(404); response.end('Not found'); return;
+  }
   const filePath = normalize(join(root, relativePath));
   if (filePath !== root && !filePath.startsWith(`${root}${sep}`)) {
     response.writeHead(403); response.end('Forbidden'); return;
