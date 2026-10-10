@@ -27,6 +27,7 @@ let selectedVertexMarker = null;
 let selectedVertexIndex = null;
 let editorMode = 'object';
 let componentMode = 'vertex';
+let dragOffset = new THREE.Vector3();
 let selectedComponentPoints = [];
 let selectedFaceIndex = null;
 let componentOverlay = null;
